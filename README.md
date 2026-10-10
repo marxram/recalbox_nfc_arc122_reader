@@ -26,6 +26,31 @@ EmulationStation reads. ES sees no difference from a hardware card reader.
 - ACR122U USB NFC reader
 - NFC cards (NTAG213/215/216, Mifare Classic, etc.)
 
+## Prerequisite: enable the card-reader device-tree overlay
+
+Everything here relies on `mount --bind` onto
+`/sys/kernel/recalbox-card-reader/`. That path only exists if the
+`recalbox-card-reader` device-tree overlay is enabled — it is **not**
+on by default. Without it, the install still "succeeds" but ES will
+never see any card state at all (the init script prints "(WARNING:
+sysfs missing)" and simply skips the bind mount).
+
+Add this line to `/boot/recalbox-user-config.txt` (create the file if
+it doesn't exist):
+
+```
+dtoverlay=recalbox-card-reader
+```
+
+Then **reboot** — this is a boot-time device-tree overlay, not
+something you can `modprobe`/hot-load afterwards. You can confirm it
+took effect after reboot:
+
+```bash
+ls /sys/kernel/recalbox-card-reader/   # must exist
+dmesg | grep -i card.reader            # "cardreader_probe: ... Card Reader is ready."
+```
+
 ## Installation
 ```bash
 # SSH into your Pi
@@ -117,7 +142,7 @@ full installation.
 |---------|----------|
 | ACR122U not detected | Check `lsusb \| grep ACR` |
 | LIBUSB_ERROR_BUSY | Old NFC daemon running: `pkill -f nfc_daemon` |
-| ES says "not installed" | Kernel module missing: `modprobe recalbox_card_reader` |
+| ES says "not installed" / no mount bind | `recalbox-card-reader` overlay not enabled — see Prerequisite above (`ls /sys/kernel/recalbox-card-reader/`, add `dtoverlay=recalbox-card-reader` to `/boot/recalbox-user-config.txt`, reboot) |
 | Card not detected | Try a different NFC card type |
 | LED not lighting up | Check logs: `cat /tmp/nfc-acr.log` |
 | Not working after update | Run: `sh /recalbox/share/system/nfc-daemon/install_nfc.sh --update` |
