@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.0 — Action cards, admin window, restricted games (this fork)
+
+### Added
+- Action cards: whitelisted shell scripts (`actions/`) triggered by
+  dedicated NFC cards, classified by full UID so they're never exposed
+  to EmulationStation as assignable game cards. See `ACTION_CARDS.md`.
+- Admin window: an admin card opens a 15s window; the next action or
+  restricted-game card tapped inside it is consumed immediately (fast
+  blink+beep confirmation), then the window closes. Normal game cards
+  are completely unaffected.
+- Restricted games: specific game UIDs (`restricted_uids` in
+  `actions.json`) require the admin window instead of launching
+  directly — used here for 18+-rated titles.
+- Daemon now rebinds `sys.stdout`/`sys.stderr` to its own log file at
+  startup, working around BusyBox `start-stop-daemon --background`
+  silently redirecting the forked process's fds to `/dev/null` (this bug
+  predates this fork's changes — logging never actually reached
+  `/tmp/nfc-acr.log` even on stock upstream when launched this way).
+
+### Fixed
+- Action-script execution no longer gated on the executable bit, which
+  is a permanent no-op on the exFAT-mounted `/recalbox/share`
+  (`fmask=0133`) — scripts are invoked as `/bin/sh <path>` instead.
+
 ## v2.0 — Association bug fix
 
 ### Fixed

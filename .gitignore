@@ -1,0 +1,6 @@
+# Real, device-specific data — never commit personal card UIDs or the
+# live game-card library. Copy actions.json.example instead.
+actions.json
+associations.json
+__pycache__/
+*.pyc

@@ -1,0 +1,16 @@
+{
+  "arm_timeout_s": 15,
+  "admin_uids": [
+    "AA:BB:CC:DD",
+    "11:22:33:44"
+  ],
+  "actions": {
+    "01:AA:AA:AA:10:02:89": {"label": "Reboot", "script": "reboot.sh"},
+    "02:AA:AA:AA:10:02:89": {"label": "Shutdown", "script": "shutdown.sh"},
+    "03:AA:AA:AA:10:02:89": {"label": "Console mode OFF", "script": "consolemode_off.sh"},
+    "04:AA:AA:AA:10:02:89": {"label": "Console mode ON", "script": "consolemode_on.sh"}
+  },
+  "restricted_uids": [
+    "05:AA:AA:AA:10:02:89"
+  ]
+}

@@ -122,6 +122,22 @@ full installation.
 | LED not lighting up | Check logs: `cat /tmp/nfc-acr.log` |
 | Not working after update | Run: `sh /recalbox/share/system/nfc-daemon/install_nfc.sh --update` |
 
+## Custom additions on this fork
+
+This fork adds, on top of everything above:
+
+- **Action cards** — NFC-triggered reboot/shutdown/console-mode scripts,
+  for devices whose case has no physical buttons anymore.
+- **Admin window** — an admin card opens a 15s window during which
+  exactly one action card (or restricted game) is accepted, with distinct
+  LED/buzzer feedback for "window open" vs. "recognized, running now".
+- **Restricted (admin-gated) games** — specific game cards (e.g. 18+
+  titles) require the admin window instead of launching directly.
+
+None of this touches how ordinary game cards behave. Full details,
+`actions.json` schema, safety rules for the action scripts, and known
+hardware gotchas: see [`ACTION_CARDS.md`](ACTION_CARDS.md).
+
 ## Technical Details
 
 ### Why mount --bind?
