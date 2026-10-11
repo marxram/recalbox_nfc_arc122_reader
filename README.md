@@ -5,6 +5,17 @@ This system allows you to use a standard **ACR122U USB NFC reader** with
 Recalbox's EmulationStation Card Reader feature. Use any NFC card
 (NTAG, Mifare, etc.) to associate and launch your retro games.
 
+### Credit
+
+This is a fork of [triplea-trax/recalbox_nfc_arc122_reader](https://github.com/triplea-trax/recalbox_nfc_arc122_reader),
+which this project is built on and was inspired by — the core daemon,
+the `mount --bind` sysfs trick, and the basic card↔game association flow
+are all theirs. This fork adds a case-button-replacement layer (action
+cards for reboot/shutdown/console-mode), an admin-gated confirmation
+step, admin-gated restricted games, and several reliability fixes found
+and fixed while running this on a real, daily-use family device. See
+[**What this fork adds**](#what-this-fork-adds) below for the full list.
+
 ## How it works
 ```
 ACR122U USB reader
@@ -59,7 +70,7 @@ ssh root@<pi-ip>
 # Download and run the installer
 mount -o remount,rw /
 mkdir -p /recalbox/share/system/nfc-daemon
-curl -sL https://raw.githubusercontent.com/triplea-trax/recalbox_nfc_arc122_reader/main/install_nfc.sh -o /recalbox/share/system/nfc-daemon/install_nfc.sh
+curl -sL https://raw.githubusercontent.com/marxram/recalbox_nfc_arc122_reader/main/install_nfc.sh -o /recalbox/share/system/nfc-daemon/install_nfc.sh
 sh /recalbox/share/system/nfc-daemon/install_nfc.sh
 
 # Reboot
@@ -147,21 +158,59 @@ full installation.
 | LED not lighting up | Check logs: `cat /tmp/nfc-acr.log` |
 | Not working after update | Run: `sh /recalbox/share/system/nfc-daemon/install_nfc.sh --update` |
 
-## Custom additions on this fork
+## What this fork adds
 
-This fork adds, on top of everything above:
+None of the following changes how ordinary game cards behave — upstream's
+tap-a-card-to-launch flow is untouched. Full details, the `actions.json`
+schema, safety rules for the action scripts, and known hardware/platform
+gotchas: see [`ACTION_CARDS.md`](ACTION_CARDS.md) and
+[`CHANGELOG.md`](CHANGELOG.md).
 
-- **Action cards** — NFC-triggered reboot/shutdown/console-mode scripts,
-  for devices whose case has no physical buttons anymore.
-- **Admin window** — an admin card opens a 15s window during which
-  exactly one action card (or restricted game) is accepted, with distinct
-  LED/buzzer feedback for "window open" vs. "recognized, running now".
+### Features
+
+- **Action cards** — NFC-triggered reboot, shutdown, and console-mode
+  on/off, for devices whose case no longer has physical buttons.
+- **Admin window** — tap an admin card to open a 15-second window;
+  exactly one action card (or restricted game) tapped inside it is
+  consumed immediately, with distinct LED/buzzer feedback for "window
+  open" vs. "recognized, running now". Everyday game cards never pass
+  through this window at all.
 - **Restricted (admin-gated) games** — specific game cards (e.g. 18+
-  titles) require the admin window instead of launching directly.
+  titles) require the admin window instead of launching directly, so a
+  casual tap can't start them.
+- **`manage_actions.py`** — an interactive CLI on the Pi to add/remove
+  admin/action/restricted cards and scaffold new action scripts, instead
+  of hand-editing `actions.json` and tailing logs.
 
-None of this touches how ordinary game cards behave. Full details,
-`actions.json` schema, safety rules for the action scripts, and known
-hardware gotchas: see [`ACTION_CARDS.md`](ACTION_CARDS.md).
+### Fixes
+
+- **Association-file corruption bug** (inherited from upstream, fixed
+  here): EmulationStation writes the `association` sysfs file in
+  `O_APPEND` mode, so re-associating an already-associated card used to
+  concatenate the new entry onto the old one, corrupting
+  `associations.json` and breaking all later scans. The daemon now
+  tracks its own writes and keeps the file clean. `clean_associations.py`
+  one-shot-repairs a file already corrupted by this.
+- **Daemon logging silently went nowhere** when launched the normal way
+  (`start-stop-daemon --background`): BusyBox redirects the forked
+  process's stdout/stderr to `/dev/null` *after* the init script's own
+  log redirect, silently winning the race. The daemon now rebinds
+  `sys.stdout`/`sys.stderr` to its log file itself at startup.
+- **Action scripts wouldn't run on exFAT** — `/recalbox/share` is exFAT
+  (`fmask=0133`), so `chmod +x` is a permanent no-op there and gating
+  execution on the executable bit always fails. Scripts are invoked via
+  `/bin/sh <path>` instead.
+- **Shutdown/reboot cards hung the device indefinitely**: raw
+  `poweroff`/`reboot` silently no-op when run from this daemon's
+  non-interactive subprocess context (no `/dev/initctl`, no utmp on this
+  image — BusyBox's `halt` can't determine the runlevel and gives up
+  without erroring). Switched to `shutdown -h now` / `shutdown -r now`,
+  the same convention Recalbox's own power-button scripts use.
+- **Documented** (though it lives outside this repo, in a third-party
+  case-vendor script) a `custom.sh` bug that hung *every* shutdown path
+  on affected devices — physical power button and ES's own menu
+  included, not just these cards — see `ACTION_CARDS.md` for the
+  diagnosis and fix.
 
 ## Technical Details
 

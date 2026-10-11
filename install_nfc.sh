@@ -9,7 +9,7 @@
 #   sh install_nfc.sh --force      Full reinstall
 #================================================================
 
-REPO_URL="https://raw.githubusercontent.com/triplea-trax/recalbox_nfc_arc122_reader/main"
+REPO_URL="https://raw.githubusercontent.com/marxram/recalbox_nfc_arc122_reader/main"
 INSTALL_DIR="/recalbox/share/system/nfc-daemon"
 SERVICE_SCRIPT="/etc/init.d/S32nfc-acr"
 CUSTOM_SH="/recalbox/share/system/custom.sh"
