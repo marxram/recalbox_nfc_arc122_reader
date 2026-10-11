@@ -143,6 +143,7 @@ behaves exactly like stock upstream.
 | `shutdown.sh` | Stops ES cleanly, `sync`, `shutdown -h now` |
 | `consolemode_off.sh` | Backs up `recalbox.conf`, stops ES, `sed`s only the `cardreader.consolemode` key to `0`, `sync`, restarts ES |
 | `consolemode_on.sh` | Same as above but sets `cardreader.consolemode` to `1` |
+| `sync_pads.sh` | Backs up `es_input.cfg`, stops ES, runs `configure_pads.py` to (re)write known pad models' `inputConfig` blocks for whichever physical hub port they're on right now, `sync`, restarts ES — see "Controller port sync" below |
 | `test_action.sh` | No-op script for exercising the action-card path without side effects |
 
 Safety rules these scripts follow (non-negotiable — see incident notes
@@ -164,6 +165,49 @@ below for why):
   (`fmask=0133`), so `chmod +x` there is a permanent no-op.
 - WLAN keys/passwords present in `recalbox.conf` are never logged or
   touched by any script here.
+
+## Controller port sync (`configure_pads.py`)
+
+With multiple identical pads (two N64 pads, several SNES-style pads)
+spread across the hub ports documented in `TODO_USB_HUBS.md`, relying on
+EmulationStation's own per-device input wizard for every single pad on
+every port it might ever occupy doesn't scale, and the wizard can't be
+driven from here anyway (it needs a human physically pressing buttons).
+`configure_pads.py` instead replays an **already-verified** button
+mapping for a known pad model onto whichever physical port it's
+currently plugged into:
+
+1. A pad model's mapping is captured **once**, by hand: run ES's input
+   wizard for it, then cross-check with `evtest` on the real
+   `/dev/input/eventN` device for anything the wizard's fixed prompt set
+   doesn't cover (e.g. this project's N64 pad has 4 C-buttons but the
+   wizard only prompts for 2 "second stick" directions — see the git
+   history around 2026-10-11 for how the other two were found).
+2. That verified mapping is added to `DEVICE_TEMPLATES` in
+   `configure_pads.py`, keyed by USB `vendor:product` (e.g. `0e6d:111d`
+   for the N64 pad's adapter).
+3. Running the script (normally via the `sync_pads.sh` action card) scans
+   `/sys/bus/usb/devices` for anything matching a known template, works
+   out its `devicePhysicalPath` from its live sysfs devpath, and
+   writes/replaces that exact port's `<inputConfig>` block in
+   `es_input.cfg` — never touching blocks for other devices or other
+   ports.
+
+**This script never guesses a hardware mapping** — the same rule as the
+LED APDU bytes above. A new pad model needs step 1 done by hand first;
+skipping straight to writing a template from assumptions is exactly the
+kind of unverified-hardware-value guess this project avoids.
+
+`devicePhysicalPath` format: ES/`by-path` writes this as
+`platform-xhci-hcd.0-usb-0:<port-chain>:1.0`, where `<port-chain>` is the
+device's sysfs devpath (e.g. `1-1.1.1`, as seen in
+`/sys/bus/usb/devices`) with the leading `<bus>-` stripped (e.g. `1.1.1`)
+— confirmed empirically against this device's own by-path symlinks, see
+`TODO_USB_HUBS.md`, not assumed from documentation.
+
+Supports `--dry-run` to show what would change without touching the
+file — always check this after adding a new template or moving pads to
+new ports before running it for real.
 
 ## Restricted (admin-gated) games
 

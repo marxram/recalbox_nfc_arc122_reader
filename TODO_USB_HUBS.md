@@ -100,13 +100,43 @@ question above, but needed for the same controller-setup goal)
 
 Steps 1-3 of the original plan (label every port, capture each label's
 path, build the table) are done — see "Confirmed port mapping" above.
+Step 5 (es_input.cfg) is also done, but automated rather than hand-done
+once-off — see below.
+
+**2026-10-11 update:** the N64 `es_input.cfg` block is unified, with
+C-buttons fixed (all 4 directions, via the `joystick2` "second stick"
+convention N64 libretro cores default to) and `hotkey`/`select` both on
+the L shoulder (this pad has no Select button). Rather than hand-editing
+`es_input.cfg` once for the then-current physical layout, this led to
+building `configure_pads.py` (see `ACTION_CARDS.md`) — it detects known
+pad models by VID:PID wherever they're currently plugged in and
+(re)writes their `devicePhysicalPath`-tagged block automatically,
+triggered via a new `sync_pads.sh` action card. Verified pad-model
+templates exist for the N64 pad (`0e6d:111d`) and two SNES-style pad
+VID:PIDs (`0810:e501`, `081f:e401`) that share one mapping.
+
+Note: the physical layout has since changed from what this file
+originally described — B2 now holds an 8BitDo SF30/SN30 pad (wired, not
+actually via Bluetooth despite the model name) instead of a second N64
+pad; that pad already works via Recalbox's own bundled stock mapping,
+no template needed. Wherever the second N64 pad ends up, `sync_pads.sh`
+will pick it up without further manual config, since the template
+covers the VID:PID regardless of port.
+
 Left to do:
 
 1. Optionally verify the Pi-port-dependency question (plug Hub A into a
    different Pi USB port and see whether only the hub-local segment of
    the path changes) — not yet tested, low priority since the hub
    currently has no reason to move.
-2. Unify the two broken N64 `es_input.cfg` blocks into one clean block,
-   using `devicePhysicalPath` `0:1.1.1` (B1) for Player 1 and `0:1.1.2`
-   (B2) for Player 2, fix the missing C-buttons, and set `hotkey=L`. BT
-   8BitDo pads stay as fallback, unaffected by any of this.
+2. **In-game verification** of the written N64 mapping — launch an
+   actual N64 game and physically confirm A/B, Z, L, and all four
+   C-buttons do the right thing. This doubles as the still-open "confirm
+   the actual N64 core in use" item below, since some forum reports
+   suggest certain cores remap RetroPad buttons to N64 buttons
+   non-trivially (e.g. RetroPad-B→N64-A) — unconfirmed for Recalbox's
+   actual default core, verify live rather than trust that.
+3. Register a card for the new `sync_pads.sh` action via
+   `manage_actions.py` on the device (tap a new/blank card through its
+   interactive flow) — not yet done, needs to happen on the device
+   itself.

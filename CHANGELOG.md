@@ -1,5 +1,21 @@
 # Changelog
 
+## v3.2 — Automated controller-port sync for multi-pad hub setups
+
+### Added
+- `configure_pads.py` — detects known pad models by USB VID:PID
+  wherever they're currently plugged in (across nested USB hubs) and
+  writes/updates their `es_input.cfg` `<inputConfig>` block with an
+  already human-verified button mapping, keyed by `devicePhysicalPath`.
+  Replaces re-running EmulationStation's per-device input wizard for
+  every pad on every port it might occupy. Ships with verified
+  templates for the project's N64 pad adapter (`0e6d:111d`) and two
+  SNES-style pad VID:PIDs (`0810:e501`, `081f:e401`) that turned out to
+  share an identical button mapping. Supports `--dry-run`.
+- `actions/sync_pads.sh` — new NFC action card wrapper around
+  `configure_pads.py`, following the same backup/stop-ES/edit/sync/
+  restart-ES pattern as every other action script here.
+
 ## v3.1 — Fix shutdown/reboot action cards actually hanging the device
 
 ### Fixed

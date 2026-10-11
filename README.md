@@ -140,6 +140,9 @@ full installation.
 - `/recalbox/share/system/nfc-daemon/config.json` — Configuration (buzzer)
 - `/recalbox/share/system/nfc-daemon/associations.json` — Card↔Game mappings
 - `/recalbox/share/system/nfc-daemon/install_nfc.sh` — Installer (for updates)
+- `/recalbox/share/system/nfc-daemon/manage_actions.py` — Interactive CLI for admin/action/restricted cards (see `ACTION_CARDS.md`)
+- `/recalbox/share/system/nfc-daemon/configure_pads.py` — Controller port-sync tool (see `ACTION_CARDS.md`)
+- `/recalbox/share/system/nfc-daemon/actions/` — Action scripts triggered by action cards (see `ACTION_CARDS.md`)
 
 ### System partition (overwritten by updates)
 - `/etc/init.d/S32nfc-acr` — Auto-start service
