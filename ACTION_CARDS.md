@@ -240,6 +240,15 @@ function, but the label falls back to `UID <n>` without it.
   file is **not** tracked by this repo (it belongs to the case vendor's
   own install) and isn't update-persistent the way `/recalbox/share` is
   guaranteed to be, so re-check it after any case-software reinstall.
+- **Shutdown/reboot cards appear stuck if ES is in attract-mode/demo
+  loop** when tapped: `S31emulationstation stop`'s `SIGTERM` is sent
+  immediately, but ES doesn't seem to act on it until its main loop next
+  gets a controller input event — observed as "nothing happens until you
+  press a button on a pad, then it shuts down within a couple seconds."
+  The card tap and the daemon side are working correctly; this is ES's
+  own demo-mode loop not noticing the pending stop promptly. Not fixed
+  (nothing to fix on our side) — just press any pad button after tapping
+  if the device happens to be in attract mode.
 
 ## Update persistence model
 
