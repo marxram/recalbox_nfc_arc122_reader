@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.4 — Fix N64 pad: dead C-Right and a stale/colliding B Button
+
+### Fixed
+- **N64 template's `a` and `joystick2right` both fed Recalbox's "C
+  Button R" mupen64 setting** (Recalbox's N64 config generator maps the
+  ES-generic names `a`/`b`/`x`/`y` onto N64-native names via a static
+  table, where `a` happens to alias the same target as
+  `joystick2right`). Two different ES names targeting one mupen64
+  setting get merged into a space-separated value by Recalbox's own
+  generator code, and that merged value doesn't work for a plain button
+  target on this device — C-Right was completely dead in-game as a
+  result. Fixed by repointing `a` to the same physical button as
+  `joystick2right` so only one ES name feeds "C Button R".
+- **N64's "B Button" (Smart Bomb) was silently stuck on a stale value**
+  from an older config generation, because the template never defined
+  `y` (the ES name the same table maps to "B Button") and Recalbox's ini
+  writer never clears keys that go missing between runs. That stale
+  value happened to collide with C-Down's button index, firing a bomb
+  on C-Down instead of braking. Fixed by adding a `y` entry for the
+  pad's real A-face button, which also frees it up since `a` moved to
+  the C-right nub above.
+- See the new "N64 pad: why `a`/`y` aren't bound to the physically
+  obvious buttons" section in `ACTION_CARDS.md` for the full mechanism —
+  this was not an offset bug, it's a Recalbox-side translation table
+  that's easy to misread as one.
+- Full button scheme verified end-to-end in Lylat Wars/Star Fox 64.
+
 ## v3.3 — Pad-type profiles (enable/disable pad classes by card tap)
 
 ### Added

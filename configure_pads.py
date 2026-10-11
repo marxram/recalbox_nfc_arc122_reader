@@ -38,11 +38,31 @@ DEVICE_TEMPLATES = {
         "gamepadtype": "8bitdo",
         # C-buttons as joystick2 (right-stick convention), matching what
         # N64 libretro cores default to - see ACTION_CARDS.md.
+        #
+        # IMPORTANT - Recalbox's N64-specific translation table
+        # (/recalbox/share_init/system/configs/mupen64/input.xml) remaps
+        # the generic ES names in a very non-obvious way:
+        #   a -> C Button R   b -> A Button
+        #   x -> C Button U   y -> B Button
+        # Any ES name present in es_input.cfg that the table also routes
+        # to the same mupen64 target gets merged into one space-separated
+        # value (e.g. "button(8) button(1)") by configgen's own code -
+        # and that merged value does not work for a plain button target on
+        # this device (verified in-game: C-Right went dead the moment "a"
+        # and "joystick2right" both fed "C Button R"). So "a" must be the
+        # *only* source of C Button R: it's deliberately bound to the same
+        # physical C-right nub as joystick2right, not the pad's real A
+        # face button. The vacated A-face code (305) is reused for "y",
+        # which is what actually feeds N64's real B Button (Smart Bomb) -
+        # previously undefined, leaving "B Button" stuck on a stale value
+        # left over from an older config generation (Recalbox's ini writer
+        # only adds/updates keys, never clears ones that go missing), which
+        # happened to collide with C Button D's button(3) and fire a bomb
+        # on C-Down. Verified end-to-end in Lylat Wars 2026-10-11.
         "inputs": [
             ("joystick2up",    "button", "9",  "1",  "313"),
             ("joystick2down",  "button", "3",  "1",  "307"),
             ("joystick2left",  "button", "0",  "1",  "304"),
-            ("joystick2right", "button", "8",  "1",  "312"),
             ("joystick1up",    "axis",   "1",  "-1", "1"),
             ("joystick1left",  "axis",   "0",  "-1", "0"),
             ("left",  "hat", "0", "8", "-1"),
@@ -56,7 +76,13 @@ DEVICE_TEMPLATES = {
             ("l2", "button", "6",  "1", "310"),
             ("r1", "button", "5",  "1", "309"),
             ("b",  "button", "2",  "1", "306"),
-            ("a",  "button", "1",  "1", "305"),
+            # "a" = the C-right nub (same physical button as
+            # joystick2right above - see the block comment) so N64's
+            # "C Button R" gets exactly one source.
+            ("a",  "button", "8",  "1", "312"),
+            # "y" = the pad's real A-face button, vacated by "a" above;
+            # feeds N64's real B Button (Smart Bomb).
+            ("y",  "button", "1",  "1", "305"),
             # Deliberately both on the L shoulder: this pad has no
             # Select button and L is otherwise unused in N64 games.
             ("hotkey", "button", "4", "1", "308"),
