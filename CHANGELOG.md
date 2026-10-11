@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.1 — Fix shutdown/reboot action cards actually hanging the device
+
+### Fixed
+- **`shutdown.sh`/`reboot.sh` called raw `poweroff`/`reboot`**, which
+  silently no-ops when run from this daemon's non-interactive subprocess
+  context (no `/dev/initctl`, no utmp on this image — BusyBox's `halt`
+  can't determine the runlevel and falls back to a no-op "soft
+  poweroff"). Both scripts now use `shutdown -h now` / `shutdown -r now`,
+  matching the convention Recalbox's own power-button scripts use. See
+  `ACTION_CARDS.md` gotchas section.
+- Diagnosed (but not part of this repo — fixed directly on the device)
+  a third-party `/recalbox/share/system/custom.sh` bug that ignored the
+  `stop` argument and relaunched an infinite GPIO-polling loop on every
+  shutdown attempt, hanging `rcK` before it could stop any other
+  service. This was blocking the physical power button and ES's own
+  shutdown menu too, not just NFC cards. See `ACTION_CARDS.md`.
+
 ## v3.0 — Action cards, admin window, restricted games (this fork)
 
 ### Added

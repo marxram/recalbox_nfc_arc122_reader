@@ -139,8 +139,8 @@ behaves exactly like stock upstream.
 
 | Script | Does |
 |---|---|
-| `reboot.sh` | Stops ES cleanly, `sync`, non-forced `reboot` |
-| `shutdown.sh` | Stops ES cleanly, `sync`, non-forced `poweroff` |
+| `reboot.sh` | Stops ES cleanly, `sync`, `shutdown -r now` |
+| `shutdown.sh` | Stops ES cleanly, `sync`, `shutdown -h now` |
 | `consolemode_off.sh` | Backs up `recalbox.conf`, stops ES, `sed`s only the `cardreader.consolemode` key to `0`, `sync`, restarts ES |
 | `consolemode_on.sh` | Same as above but sets `cardreader.consolemode` to `1` |
 | `test_action.sh` | No-op script for exercising the action-card path without side effects |
@@ -155,9 +155,10 @@ below for why):
 - **Config edits are always a targeted `sed` on one exact key**, never a
   full-file rewrite, and always preceded by a timestamped backup under
   `config-backups/`.
-- **Reboot/shutdown are always the clean, non-forced command** (`reboot`,
-  `poweroff`, not `-f`/`reboot -f`), preceded by `sync`, so BusyBox still
-  runs its normal init shutdown sequence.
+- **Reboot/shutdown always go through `shutdown -r now` / `shutdown -h
+  now`** (never raw `reboot`/`poweroff`, never a `-f` variant), preceded
+  by `sync`. Raw `poweroff`/`reboot` silently no-op when run from this
+  daemon's subprocess context — see the gotcha below.
 - Scripts are invoked as `/bin/sh <path>` by the daemon, never relied on
   for their own executable bit — `/recalbox/share` is exFAT
   (`fmask=0133`), so `chmod +x` there is a permanent no-op.
@@ -215,6 +216,30 @@ function, but the label falls back to `UID <n>` without it.
   `led_command()` are proven against the real ACR122U. Everything else
   is a guess and guesses have bricked the LED state on this hardware
   before (see State machine section above).
+- **Raw `poweroff`/`reboot` silently no-op from a daemon subprocess**:
+  this image has no `/dev/initctl` and no `/var/run/utmp`, so BusyBox's
+  `halt` (what `poweroff`/`reboot` symlink to) can't determine the
+  runlevel when invoked without a controlling TTY, logs `WARNING: could
+  not determine runlevel - doing soft poweroff`, and that fallback does
+  nothing — no error, no crash, it just never powers off. Always use
+  `shutdown -h now` / `shutdown -r now` instead (same convention
+  Recalbox's own `powerswitch.sh`/`rpi-pin*-power.py` use).
+- **`/recalbox/share/system/custom.sh` (third-party "SuperPi4 case
+  button" hook, not part of this repo) hangs every shutdown/reboot on
+  this device**: `/etc/init.d/S99custom` passes `$1` (start/stop) through
+  to it, but `custom.sh` ignores `$1` entirely and always runs
+  `powerswitch.sh start` — an infinite GPIO-polling loop that never
+  returns. Since `rcK` stops services in reverse order and `S99custom` is
+  the *first* one it stops, this hung `rcK` immediately, before it ever
+  got to `S50dropbear`/`S91smb`/etc. — meaning every shutdown path
+  (physical power button, ES's own "Shutdown System" menu, and our NFC
+  card) was hanging, not just this project's script. Fixed on the live
+  device by making `custom.sh` only call `powerswitch.sh start` when
+  `$1` is not `stop`; backup at
+  `/recalbox/share/system/custom.sh.20261011-105428.bak` on the Pi. This
+  file is **not** tracked by this repo (it belongs to the case vendor's
+  own install) and isn't update-persistent the way `/recalbox/share` is
+  guaranteed to be, so re-check it after any case-software reinstall.
 
 ## Update persistence model
 
