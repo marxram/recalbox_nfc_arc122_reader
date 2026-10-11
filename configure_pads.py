@@ -24,6 +24,15 @@ import sys
 SYSFS_USB = "/sys/bus/usb/devices"
 ES_INPUT_CFG = "/recalbox/share/system/.emulationstation/es_input.cfg"
 
+# Persistent override of Recalbox's N64 ES-name -> mupen64-setting table
+# (see the N64 template's comment below for why this exists). Recalbox
+# reads /recalbox/share/system/configs/mupen64/input.xml in preference to
+# its own /recalbox/share_init/... copy if present, and - like every file
+# under share - it survives updates, so this only needs deploying once.
+MUPEN64_INPUT_OVERRIDE_SRC = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "configs", "mupen64", "input.xml")
+MUPEN64_INPUT_OVERRIDE_DST = "/recalbox/share/system/configs/mupen64/input.xml"
+
 # Each template was captured by hand on this project's real hardware -
 # see ACTION_CARDS.md for the device and the date it was verified.
 DEVICE_TEMPLATES = {
@@ -39,30 +48,27 @@ DEVICE_TEMPLATES = {
         # C-buttons as joystick2 (right-stick convention), matching what
         # N64 libretro cores default to - see ACTION_CARDS.md.
         #
-        # IMPORTANT - Recalbox's N64-specific translation table
-        # (/recalbox/share_init/system/configs/mupen64/input.xml) remaps
-        # the generic ES names in a very non-obvious way:
-        #   a -> C Button R   b -> A Button
-        #   x -> C Button U   y -> B Button
-        # Any ES name present in es_input.cfg that the table also routes
-        # to the same mupen64 target gets merged into one space-separated
-        # value (e.g. "button(8) button(1)") by configgen's own code -
-        # and that merged value does not work for a plain button target on
-        # this device (verified in-game: C-Right went dead the moment "a"
-        # and "joystick2right" both fed "C Button R"). So "a" must be the
-        # *only* source of C Button R: it's deliberately bound to the same
-        # physical C-right nub as joystick2right, not the pad's real A
-        # face button. The vacated A-face code (305) is reused for "y",
-        # which is what actually feeds N64's real B Button (Smart Bomb) -
-        # previously undefined, leaving "B Button" stuck on a stale value
-        # left over from an older config generation (Recalbox's ini writer
-        # only adds/updates keys, never clears ones that go missing), which
-        # happened to collide with C Button D's button(3) and fire a bomb
-        # on C-Down. Verified end-to-end in Lylat Wars 2026-10-11.
+        # IMPORTANT - stock Recalbox's N64-specific translation table
+        # (/recalbox/share_init/system/configs/mupen64/input.xml) routes
+        # the generic ES name "a" to "C Button R" by default - the same
+        # mupen64 target "joystick2right" below also feeds. Two ES names
+        # feeding one mupen64 target get merged into one space-separated
+        # value by Recalbox's own generator code, and that merged value
+        # does not work for a plain button target on this device (verified
+        # in-game: C-Right went dead the instant both fed "C Button R").
+        # Rather than repurpose "a"/"y" away from their natural physical
+        # buttons to dodge this, this project ships a persistent override
+        # of that table (configs/mupen64/input.xml in this repo, deployed
+        # by ensure_mupen64_input_override() below) that routes "a" to
+        # "B Button" instead - giving the pad's real A-face button a job
+        # (N64's Smart Bomb) without taking anything from "joystick2right".
+        # See ACTION_CARDS.md for the full writeup. Verified end-to-end in
+        # Lylat Wars 2026-10-11.
         "inputs": [
             ("joystick2up",    "button", "9",  "1",  "313"),
             ("joystick2down",  "button", "3",  "1",  "307"),
             ("joystick2left",  "button", "0",  "1",  "304"),
+            ("joystick2right", "button", "8",  "1",  "312"),
             ("joystick1up",    "axis",   "1",  "-1", "1"),
             ("joystick1left",  "axis",   "0",  "-1", "0"),
             ("left",  "hat", "0", "8", "-1"),
@@ -76,13 +82,7 @@ DEVICE_TEMPLATES = {
             ("l2", "button", "6",  "1", "310"),
             ("r1", "button", "5",  "1", "309"),
             ("b",  "button", "2",  "1", "306"),
-            # "a" = the C-right nub (same physical button as
-            # joystick2right above - see the block comment) so N64's
-            # "C Button R" gets exactly one source.
-            ("a",  "button", "8",  "1", "312"),
-            # "y" = the pad's real A-face button, vacated by "a" above;
-            # feeds N64's real B Button (Smart Bomb).
-            ("y",  "button", "1",  "1", "305"),
+            ("a",  "button", "1",  "1", "305"),
             # Deliberately both on the L shoulder: this pad has no
             # Select button and L is otherwise unused in N64 games.
             ("hotkey", "button", "4", "1", "308"),
@@ -206,8 +206,35 @@ def replace_block(content, physical_path, new_block):
     return content
 
 
+def ensure_mupen64_input_override(dry_run=False):
+    """Keep /recalbox/share/system/configs/mupen64/input.xml in sync with
+    this repo's copy, so stock Recalbox's N64 "a"->"C Button R" collision
+    (see the N64 template's comment) stays fixed across updates. No-op if
+    this repo's copy isn't present (e.g. configure_pads.py deployed alone
+    without the rest of the repo) or already matches."""
+    if not os.path.isfile(MUPEN64_INPUT_OVERRIDE_SRC):
+        return
+    with open(MUPEN64_INPUT_OVERRIDE_SRC) as f:
+        src = f.read()
+    if os.path.isfile(MUPEN64_INPUT_OVERRIDE_DST):
+        with open(MUPEN64_INPUT_OVERRIDE_DST) as f:
+            if f.read() == src:
+                return
+    print(f"Mupen64 input.xml override out of date or missing at "
+          f"{MUPEN64_INPUT_OVERRIDE_DST}")
+    if dry_run:
+        print("--dry-run: not writing changes.")
+        return
+    os.makedirs(os.path.dirname(MUPEN64_INPUT_OVERRIDE_DST), exist_ok=True)
+    with open(MUPEN64_INPUT_OVERRIDE_DST, "w") as f:
+        f.write(src)
+    print(f"Wrote {MUPEN64_INPUT_OVERRIDE_DST}")
+
+
 def main():
     dry_run = "--dry-run" in sys.argv
+
+    ensure_mupen64_input_override(dry_run)
 
     if not os.path.isfile(ES_INPUT_CFG):
         print(f"ERROR: {ES_INPUT_CFG} not found", file=sys.stderr)

@@ -1,0 +1,42 @@
+<inputList>
+<input name="AnalogDeadzone" value="4096,4096" />
+<input name="AnalogPeak"     value="32768,32768" />
+<!-- Stock Recalbox default maps "a" to "C Button R", which collides with
+     "joystick2right" (also "C Button R" by default) for any pad that uses
+     the right-analog-stick convention for the four C-buttons - two ES
+     names feeding the same mupen64 setting get merged into one
+     space-separated value by Recalbox's own generator code, and that
+     merged value doesn't work for a plain button target. Only the two
+     official "Nintendo Switch N64 Controller"/"N64 Controller"-named pads
+     get a hardcoded bypass for this; every other third-party N64 pad using
+     the right-stick C-button convention hits the same collision we did.
+     Routing "a" to "B Button" instead gives the pad's real A-face button a
+     use (N64's Smart Bomb) without taking anything away from "joystick2right",
+     which keeps "C Button R" as its sole, uncontested source. See
+     ACTION_CARDS.md for the full writeup (verified in Lylat Wars/Star Fox 64,
+     2026-10-11). -->
+<input name="a"        	     value="B Button" />
+<input name="b"        	     value="A Button" />
+<input name="x"        	     value="C Button U" />
+<input name="y"        	     value="B Button" />
+<input name="start"    	     value="Start" />
+<input name="select"   	     value="" />
+<input name="l1"   		     value="L Trig" />
+<input name="r1"	 	     value="R Trig" />
+<input name="l2"       	     value="Z Trig" />
+<input name="r2"       	     value="" />
+<input name="l3"             value="Mempak switch" />
+<input name="r3"             value="Rumblepak switch" />
+<input name="up"       	     value="DPad U" />
+<input name="down"     	     value="DPad D" />
+<input name="right"    	     value="DPad R" />
+<input name="left"     	     value="DPad L" />
+<input name="joystick1up"    value="Y Axis" />
+<input name="joystick1down"  value="Y Axis" />
+<input name="joystick1left"  value="X Axis" />
+<input name="joystick1right" value="X Axis" />
+<input name="joystick2up"    value="C Button U" />
+<input name="joystick2down"  value="C Button D" />
+<input name="joystick2left"  value="C Button L" />
+<input name="joystick2right" value="C Button R" />
+</inputList>

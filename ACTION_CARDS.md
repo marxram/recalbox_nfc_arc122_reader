@@ -212,18 +212,14 @@ Supports `--dry-run` to show what would change without touching the
 file — always check this after adding a new template or moving pads to
 new ports before running it for real.
 
-### N64 pad: why `a`/`y` aren't bound to the physically obvious buttons
-
-The N64 template's `a` and `y` entries look backwards at first glance —
-`a` is bound to the pad's C-right nub, and `y` (not `a` or `b`) is bound
-to its real A-face button. This isn't a mistake; it's forced by a
-Recalbox-side translation table that's easy to miss.
+### N64 pad: the `a`/`C Button R` collision, and the `input.xml` override
 
 Recalbox's N64 config generator (`mupenControllers.py` on the device)
 doesn't read `es_input.cfg`'s raw `id`/`code` values for C-buttons/A/B
 directly — it looks up the **ES-generic name** (`a`, `b`, `x`, `y`,
-`joystick2up`, ...) in a static table shipped at
-`/recalbox/share_init/system/configs/mupen64/input.xml`:
+`joystick2up`, ...) in a static table Recalbox ships at
+`/recalbox/share_init/system/configs/mupen64/input.xml` (this is also
+documented on Recalbox's own wiki, under N64 controller configuration):
 
 ```
 a -> C Button R      b -> A Button
@@ -232,35 +228,50 @@ joystick2up -> C Button U     joystick2down  -> C Button D
 joystick2left -> C Button L   joystick2right -> C Button R
 ```
 
-So `a` and `joystick2right` both target "C Button R", and `x` and
-`joystick2up` both target "C Button U". When two different ES names
-target the same mupen64 setting, Recalbox's own generator code merges
-them into one space-separated value (e.g. `C Button R = button(8)
-button(1)`) instead of picking one. On this device that merged value
-does not work for a plain button target — verified in-game: C-Right
-went completely dead the moment both `a` and `joystick2right` were
-defined, and came back the instant `a` was repointed to carry the exact
-same button as `joystick2right` (code 312) so only one ES name feeds
-"C Button R" at all.
+Stock, this means `a` and `joystick2right` both target "C Button R" for
+any pad using the right-analog-stick convention for C-buttons (like
+this project's N64 template). When two different ES names target the
+same mupen64 setting, Recalbox's own generator code merges them into
+one space-separated value (e.g. `C Button R = button(8) button(1)`)
+instead of picking one — and on this device that merged value does not
+work for a plain button target: verified in-game, C-Right was
+completely dead with both `a` and `joystick2right` defined normally.
+Recalbox's wiki confirms only the two official
+`Nintendo Switch N64 Controller`/`N64 Controller`-named pads get a
+hardcoded bypass for this; every other third-party N64 pad using the
+stick convention hits the same collision.
 
-That's why the template binds `a` to the C-right nub (not the pad's
-real A-face button) and introduces `y` for the real A-face button
-(code 305) instead — `y` is what actually reaches N64's "B Button"
-(Smart Bomb) in the table above. Before `y` existed, "B Button" in the
-generated `mupen64plus.cfg` was never written by this pad at all and
+Also, before this was fixed, `y` was never defined by this pad at all,
+so "B Button" in the generated `mupen64plus.cfg` was never written and
 sat on a stale value left over from an older config generation
 (Recalbox's ini writer only adds/updates keys it's given, it never
 clears ones that go missing) — which happened to collide with C-Down's
 button index and fired a bomb on C-Down instead of braking.
 
-**Don't add `x` to this template** without also removing
-`joystick2up`, for the same reason: both target "C Button U" and would
-reproduce the exact same breakage that `a`/`joystick2right` had.
+**The fix ships a persistent override** of that table at
+`configs/mupen64/input.xml` in this repo, deployed to
+`/recalbox/share/system/configs/mupen64/input.xml` by
+`ensure_mupen64_input_override()` in `configure_pads.py` (runs on every
+`sync_pads.sh` tap, independent of which pads are currently plugged
+in). It changes exactly one line: `a` now routes to `B Button` instead
+of `C Button R`. That gives the pad's real A-face button a job (N64's
+Smart Bomb) and leaves `joystick2right` as the sole, uncontested source
+of "C Button R" — so the N64 template's `es_input.cfg` entries stay
+natural (`a` = real A-face button, `b` = real B/C-face button,
+`joystick2up/down/left/right` = the real C-cluster), no repurposing
+needed. Recalbox re-reads `input.xml` at every game launch, and
+`/recalbox/share/...` survives updates, so this is a one-time deploy.
 
-Full button scheme verified end-to-end in Lylat Wars/Star Fox 64
-2026-10-11 (A=laser, B=Smart Bomb, C-Up=camera, C-Down=brake,
-C-Left=boost/+stick-down=the flip-turn move, C-Right=no visible flight
-effect — its real job is replaying radio messages, not a maneuver).
+**Don't add `x` to the N64 template** without a matching override line
+for it too, for the same reason: stock, `x` and `joystick2up` both
+target "C Button U" and would reproduce the exact same breakage.
+
+Button scheme verified end-to-end in Lylat Wars/Star Fox 64
+2026-10-11: A=laser, B=Smart Bomb, C-Up=camera, C-Down=brake,
+C-Left=boost (+ stick-down = the flip-turn move). C-Right's expected
+effect (replaying radio messages, not a flight maneuver, per community
+guides) is still unconfirmed — nobody's reliably pressed that exact
+physical button in testing yet, see the git history around this date.
 
 ## Pad profiles (`pad_profiles.py`)
 
