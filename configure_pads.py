@@ -40,9 +40,9 @@ DEVICE_TEMPLATES = {
         # N64 libretro cores default to - see ACTION_CARDS.md.
         "inputs": [
             ("joystick2up",    "button", "9",  "1",  "313"),
-            ("joystick2down",  "button", "8",  "1",  "312"),
+            ("joystick2down",  "button", "8",  "1",  "307"),
             ("joystick2left",  "button", "0",  "1",  "304"),
-            ("joystick2right", "button", "3",  "1",  "307"),
+            ("joystick2right", "button", "3",  "1",  "312"),
             ("joystick1up",    "axis",   "1",  "-1", "1"),
             ("joystick1left",  "axis",   "0",  "-1", "0"),
             ("left",  "hat", "0", "8", "-1"),
