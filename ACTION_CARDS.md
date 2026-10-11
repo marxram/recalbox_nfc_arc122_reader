@@ -144,6 +144,9 @@ behaves exactly like stock upstream.
 | `consolemode_off.sh` | Backs up `recalbox.conf`, stops ES, `sed`s only the `cardreader.consolemode` key to `0`, `sync`, restarts ES |
 | `consolemode_on.sh` | Same as above but sets `cardreader.consolemode` to `1` |
 | `sync_pads.sh` | Backs up `es_input.cfg`, stops ES, runs `configure_pads.py` to (re)write known pad models' `inputConfig` blocks for whichever physical hub port they're on right now, `sync`, restarts ES — see "Controller port sync" below |
+| `pads_only_n64.sh` | Disables every recognized pad model except N64 pads (reversible `usbhid` unbind, no ES restart) — see "Pad profiles" below |
+| `pads_only_snes.sh` | Same, but keeps only SNES-style pads enabled |
+| `pads_all.sh` | Re-enables every recognized pad model (reset) |
 | `test_action.sh` | No-op script for exercising the action-card path without side effects |
 
 Safety rules these scripts follow (non-negotiable — see incident notes
@@ -208,6 +211,39 @@ device's sysfs devpath (e.g. `1-1.1.1`, as seen in
 Supports `--dry-run` to show what would change without touching the
 file — always check this after adding a new template or moving pads to
 new ports before running it for real.
+
+## Pad profiles (`pad_profiles.py`)
+
+With several pads of different types connected permanently (so nobody
+has to hunt for "the right one"), it helps to be able to say "only N64
+pads should work right now" — more deterministic controller assignment
+when launching a specific system, and it means a player grabbing the
+wrong pad type just gets nothing instead of a pad that's mapped for a
+different system entirely.
+
+`pad_profiles.py <profile>` enables/disables whole classes of pads by
+unbinding/rebinding them from the kernel's `usbhid` driver — a
+reversible "soft unplug" that needs no physical replugging and works
+even on hubs with no per-port power switching (most cheap ones don't
+support that). A disabled pad disappears from `/dev/input` exactly as
+if unplugged; EmulationStation/RetroArch already handle that as a
+normal hotplug event, so **no ES restart is needed** for this one,
+unlike every other action script here. (Corollary: disabling a pad
+someone is actively using mid-game will drop their input, same as
+yanking the cable — that's the intended behavior, not a bug.)
+
+It only ever touches devices with a verified entry in
+`configure_pads.py`'s `DEVICE_TEMPLATES` — never the NFC reader,
+Bluetooth dongle, keyboard/mouse, or any pad model without a template
+(e.g. the 8BitDo SF30/SN30 pad, which needs no custom template since
+Recalbox's own stock mapping already handles it — it's currently
+untouched by any profile).
+
+Profiles are just a set of VID:PIDs that stay enabled; defined in
+`PROFILES` in `pad_profiles.py`:
+- `n64` — only `0e6d:111d`
+- `snes` — `0810:e501` and `081f:e401`
+- `all` — every known template (reset)
 
 ## Restricted (admin-gated) games
 

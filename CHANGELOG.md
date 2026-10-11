@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.3 — Pad-type profiles (enable/disable pad classes by card tap)
+
+### Added
+- `pad_profiles.py` — enables/disables whole classes of known pad
+  models by unbinding/rebinding them from the kernel's `usbhid` driver,
+  a reversible "soft unplug" needing no replug and no ES restart.
+  Scoped to only devices with a verified template in
+  `configure_pads.py` — never touches the NFC reader, Bluetooth dongle,
+  or anything unrecognized. Ships `n64`, `snes`, and `all` (reset)
+  profiles.
+- `actions/pads_only_n64.sh`, `actions/pads_only_snes.sh`,
+  `actions/pads_all.sh` — new action card wrappers around it.
+
 ## v3.2 — Automated controller-port sync for multi-pad hub setups
 
 ### Added
