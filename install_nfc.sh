@@ -71,6 +71,10 @@ if [ "$MODE" = "update" ]; then
         warn "Daemon missing: $INSTALL_DIR/nfc_acr_daemon.py"
         MISSING=1
     fi
+    if [ ! -f "$INSTALL_DIR/api_server.py" ]; then
+        warn "API module missing: $INSTALL_DIR/api_server.py"
+        MISSING=1
+    fi
     if [ ! -f "$INSTALL_DIR/config.json" ]; then
         warn "Config missing: $INSTALL_DIR/config.json"
         MISSING=1
@@ -91,42 +95,46 @@ if [ "$MODE" = "install" ] || [ "$MODE" = "force" ] || [ "$NEED_FULL_INSTALL" -e
 
     mkdir -p "$INSTALL_DIR"
 
-    # Download or copy daemon
-    echo -n "Installing daemon... "
+    # Download or copy daemon + its API module (both land in the same
+    # persistent dir, both need to survive a Recalbox update the same way)
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    INSTALLED=0
 
-    # Try local file first (tarball install)
-    if [ -f "$SCRIPT_DIR/nfc_acr_daemon.py" ]; then
-        cp -f "$SCRIPT_DIR/nfc_acr_daemon.py" "$INSTALL_DIR/"
-        INSTALLED=1
-    fi
+    for f in nfc_acr_daemon.py api_server.py; do
+        echo -n "Installing $f... "
+        INSTALLED=0
 
-    # Try download if local not found
-    if [ "$INSTALLED" -eq 0 ]; then
-        if command -v curl >/dev/null 2>&1; then
-            curl -sL "$REPO_URL/nfc_acr_daemon.py" -o "$INSTALL_DIR/nfc_acr_daemon.py"
-            [ -s "$INSTALL_DIR/nfc_acr_daemon.py" ] && INSTALLED=1
-        elif command -v wget >/dev/null 2>&1; then
-            wget -q "$REPO_URL/nfc_acr_daemon.py" -O "$INSTALL_DIR/nfc_acr_daemon.py"
-            [ -s "$INSTALL_DIR/nfc_acr_daemon.py" ] && INSTALLED=1
+        # Try local file first (tarball install)
+        if [ -f "$SCRIPT_DIR/$f" ]; then
+            cp -f "$SCRIPT_DIR/$f" "$INSTALL_DIR/"
+            INSTALLED=1
         fi
-    fi
 
-    if [ "$INSTALLED" -eq 0 ]; then
-        error "Could not install daemon"
-        exit 1
-    fi
+        # Try download if local not found
+        if [ "$INSTALLED" -eq 0 ]; then
+            if command -v curl >/dev/null 2>&1; then
+                curl -sL "$REPO_URL/$f" -o "$INSTALL_DIR/$f"
+                [ -s "$INSTALL_DIR/$f" ] && INSTALLED=1
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q "$REPO_URL/$f" -O "$INSTALL_DIR/$f"
+                [ -s "$INSTALL_DIR/$f" ] && INSTALLED=1
+            fi
+        fi
 
-    # Verify it's not a 404 page
-    if head -1 "$INSTALL_DIR/nfc_acr_daemon.py" | grep -q "404"; then
-        error "Download failed (404). Check that the repository is public."
-        rm -f "$INSTALL_DIR/nfc_acr_daemon.py"
-        exit 1
-    fi
+        if [ "$INSTALLED" -eq 0 ]; then
+            error "Could not install $f"
+            exit 1
+        fi
 
-    chmod +x "$INSTALL_DIR/nfc_acr_daemon.py"
-    info "Daemon installed"
+        # Verify it's not a 404 page
+        if head -1 "$INSTALL_DIR/$f" | grep -q "404"; then
+            error "Download failed (404) for $f. Check that the repository is public."
+            rm -f "$INSTALL_DIR/$f"
+            exit 1
+        fi
+
+        chmod +x "$INSTALL_DIR/$f"
+        info "$f installed"
+    done
 
     # Copy install script to survive updates
     if [ -f "$SCRIPT_DIR/install_nfc.sh" ] && [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
@@ -136,8 +144,18 @@ if [ "$MODE" = "install" ] || [ "$MODE" = "force" ] || [ "$NEED_FULL_INSTALL" -e
 
     # Config (preserve existing unless force)
     if [ "$MODE" = "force" ] || [ ! -f "$INSTALL_DIR/config.json" ]; then
-        echo '{"buzzer": false}' > "$INSTALL_DIR/config.json"
-        info "Config created (buzzer: OFF)"
+        API_TOKEN="$(python3 -c "import secrets; print(secrets.token_hex(24))" 2>/dev/null)"
+        cat > "$INSTALL_DIR/config.json" << CFGEOF
+{
+  "buzzer": false,
+  "nfc_games": true,
+  "nfc_actions": true,
+  "api": {"enabled": false, "port": 8080, "token": "$API_TOKEN"}
+}
+CFGEOF
+        info "Config created (buzzer: OFF, nfc_games/nfc_actions: ON, api: OFF)"
+        echo " Generated API token (needed once you set api.enabled=true):"
+        echo "   $API_TOKEN"
     else
         info "Existing config preserved"
     fi
@@ -249,9 +267,13 @@ echo " Or start manually without reboot:"
 echo "   /etc/init.d/S32nfc-acr restart"
 echo "   /etc/init.d/S32nfc-acr status"
 echo ""
-echo " Buzzer: edit $INSTALL_DIR/config.json"
-echo '   {"buzzer": false}  -> silent (default)'
-echo '   {"buzzer": true}   -> beep on detection'
+echo " Config: edit $INSTALL_DIR/config.json (or use manage_actions.py)"
+echo '   "buzzer"      -> beep on card detection (default: off)'
+echo '   "nfc_games"   -> cartridge slot launches games (default: on)'
+echo '   "nfc_actions" -> admin/action/restricted cards (default: on)'
+echo '   "api.enabled" -> HTTP remote-control API, see api_server.py (default: off)'
+echo " Restart the service after any config.json change:"
+echo "   /etc/init.d/S32nfc-acr restart"
 echo ""
 echo " After a Recalbox update:"
 echo "   mount -o remount,rw /"

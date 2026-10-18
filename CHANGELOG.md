@@ -1,5 +1,55 @@
 # Changelog
 
+## v3.6 — Secure remote-control API + play-session log
+
+### Added
+- **`api_server.py`**: stdlib-only (no new pip dependency to survive a
+  Recalbox update) HTTP API running as a background thread inside
+  `nfc_acr_daemon.py` — no second init.d service. Exposes an implicit
+  allowlist of everything already in `actions.json`/`associations.json`
+  (run an action script, launch/stop a game) behind a bearer token, plus
+  a self-documenting `GET /` page. Does not duplicate the native
+  Recalbox Manager v3 API (`:81/api/*`). See `api-docs/README.md` for
+  the integration reference and `ACTION_CARDS.md`'s "Remote-control
+  API" section for the implementation writeup.
+- **Three independent feature flags** in `config.json`: `nfc_games`,
+  `nfc_actions`, `api.enabled` — any combination works, including
+  API-only with no physical reader claimed at all.
+- **`virtual_card` tracking** in the daemon so a card tapped physically
+  and a game launched via the API can coexist: removing the physical
+  card never stops an API-launched game, but a genuine new physical
+  tap always takes over immediately.
+- **Play-session log** (`play_log.jsonl`, `GET /playlog`): start/end/
+  duration/source per session, written from the same `_set_game_state`/
+  `_clear_game_state` choke point every game-state transition already
+  goes through. Nothing native tracks play *duration* at all.
+- **`manage_actions.py config`** subcommand to toggle the three flags
+  and regenerate the API token without hand-editing `config.json`.
+
+### Fixed
+- **Console mode ON/OFF cards were swapped** on the live device — the
+  scripts themselves were correct, the bug was the two physical cards'
+  UID-to-script assignment in `actions.json` being backwards. Fixed by
+  swapping the two entries' `{label, script}` pairs.
+- **Idle screensaver blocked API game launches**: `emulationstation.
+  screensaver.type=demo` only exits on a real controller button press
+  (confirmed via Recalbox's docs), which an API call has no way to
+  send. Disabled entirely via `emulationstation.screensaver.time=0`
+  (new key, had to be appended rather than `sed`-replaced) — verified
+  clean for 10 minutes live, past the old 5-minute default.
+- **A found-live bug in the API itself**: action labels containing
+  spaces (e.g. "Console mode ON") weren't percent-encoded on the docs
+  page or decoded by the server, so 3 of the 4 live actions couldn't
+  actually be triggered through the API as shipped. Fixed with
+  `urllib.parse.quote`/`unquote`.
+
+### Known issue, not yet resolved
+- Switching directly from one already-running game to another via a
+  single `POST /games/<uid>/launch` call is unreliable (worked once in
+  live testing, failed on two immediate retries after a related fix).
+  Workaround: always `POST /games/stop` then a separate `launch` call
+  — both independently confirmed reliable. See `ACTION_CARDS.md`.
+
 ## v3.5 — Fix N64 pad properly: override Recalbox's input.xml table
 
 ### Changed

@@ -41,6 +41,7 @@ import time
 import json
 import signal
 import subprocess
+import threading
 import usb1
 
 # The init script starts this daemon via BusyBox's
@@ -64,6 +65,7 @@ ASSOC_FILE = "/recalbox/share/system/nfc-daemon/associations.json"
 CONFIG_FILE = "/recalbox/share/system/nfc-daemon/config.json"
 ACTIONS_FILE = "/recalbox/share/system/nfc-daemon/actions.json"
 ACTIONS_DIR = "/recalbox/share/system/nfc-daemon/actions"
+PLAYLOG_FILE = "/recalbox/share/system/nfc-daemon/play_log.jsonl"
 ACR_VID = 0x072f
 ACR_PID = 0x2200
 
@@ -87,6 +89,29 @@ class ACRDaemon:
         self.handle = None
         self.ctx = None
         self.buzzer = False
+        self.nfc_games = True
+        self.nfc_actions = True
+        self.api_enabled = False
+        self.api_port = 8080
+        self.api_token = ""
+        self._api_httpd = None
+
+        # Guards every mutation of the fake-card-reader files and every
+        # whitelisted-script launch -- the hardware poll loop and the
+        # optional HTTP API thread can both call into these now.
+        self._lock = threading.Lock()
+
+        # True when the current "card plugged" state was set by the API,
+        # not by a real tap. Lets an API-launched game survive the poll
+        # loop's own "no real card seen" auto-clear (see run()), while a
+        # genuine physical tap still always takes over immediately.
+        self.virtual_card = False
+
+        # Play-log session tracking (see _session_open/_session_close).
+        # None = no session currently open.
+        self._session_start = None
+        self._session_uid = None
+        self._session_source = None
 
         # BUGFIX: mémoire de la dernière valeur écrite dans "association".
         # Sert à distinguer ce que le daemon a écrit lui-même de ce que ES
@@ -137,13 +162,23 @@ class ACRDaemon:
             print(f"[ACR] Save error: {e}")
 
     def load_config(self):
+        """Missing file or any read error = every flag keeps its default
+        (buzzer off, NFC games+actions on, API off) -- same fallback
+        behaviour as before this file gained more keys."""
         try:
             with open(CONFIG_FILE, 'r') as f:
                 cfg = json.load(f)
-            self.buzzer = cfg.get("buzzer", False)
-            print(f"[ACR] Config: buzzer={self.buzzer}")
-        except:
-            self.buzzer = False
+        except Exception:
+            cfg = {}
+        self.buzzer = cfg.get("buzzer", False)
+        self.nfc_games = cfg.get("nfc_games", True)
+        self.nfc_actions = cfg.get("nfc_actions", True)
+        api_cfg = cfg.get("api") or {}
+        self.api_enabled = bool(api_cfg.get("enabled", False))
+        self.api_port = int(api_cfg.get("port", 8080))
+        self.api_token = api_cfg.get("token", "") or ""
+        print(f"[ACR] Config: buzzer={self.buzzer} nfc_games={self.nfc_games} "
+              f"nfc_actions={self.nfc_actions} api_enabled={self.api_enabled}")
 
     def load_actions(self):
         """Load actions.json (optional). Missing file = feature disabled,
@@ -250,8 +285,9 @@ class ACRDaemon:
 
             uid_str = str(self.uuid)
             if self.associations.get(uid_str) != new_assoc:
-                self.associations[uid_str] = new_assoc
-                self.save_associations()
+                with self._lock:
+                    self.associations[uid_str] = new_assoc
+                    self.save_associations()
                 print(f"[ACR] Association: UID={uid_str} -> {new_assoc}")
 
                 # Nettoyer le fichier : garder uniquement la nouvelle assoc
@@ -270,8 +306,9 @@ class ACRDaemon:
             if content and content not in ("0", ""):
                 uid_str = str(self.uuid)
                 if uid_str in self.associations:
-                    del self.associations[uid_str]
-                    self.save_associations()
+                    with self._lock:
+                        del self.associations[uid_str]
+                        self.save_associations()
                     print(f"[ACR] Reset association for UID={uid_str}")
                 with open(path, 'w') as f:
                     f.write("")
@@ -372,6 +409,10 @@ class ACRDaemon:
         return ":".join(f"{b:02X}" for b in uid_bytes)
 
     def classify(self, full_uid):
+        if not self.nfc_actions:
+            # Admin/action/restricted cards disabled by config -- every
+            # card is just a (possibly unknown) game card.
+            return 'game'
         if full_uid in self.admin_uids:
             return 'admin'
         if full_uid in self.actions:
@@ -416,6 +457,202 @@ class ACRDaemon:
             self.led_command('red')
             time.sleep(0.15)
 
+    def _session_open(self, uid_int, source):
+        """Start tracking a play session for the play-log. Call only
+        while holding self._lock, right after the new 'plugged' state
+        is committed."""
+        self._session_start = time.time()
+        self._session_uid = uid_int
+        self._session_source = source
+
+    def _session_close(self):
+        """Append one completed session to PLAYLOG_FILE (one line of
+        JSON: start/end/duration_s/uid/game/source), if one was open.
+        Call only while holding self._lock, right before the game that
+        started it stops being the active one."""
+        if self._session_start is None:
+            return
+        end = time.time()
+        uid_str = str(self._session_uid)
+        assoc = self.associations.get(uid_str, "")
+        name = assoc.rsplit('/', 1)[-1] if assoc else uid_str
+        entry = {
+            "start": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                    time.localtime(self._session_start)),
+            "end": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(end)),
+            "duration_s": round(end - self._session_start, 1),
+            "uid": uid_str,
+            "game": name,
+            "source": self._session_source,
+        }
+        try:
+            with open(PLAYLOG_FILE, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+            print(f"[ACR] Play session logged: {entry['game']} "
+                  f"({entry['duration_s']}s, {entry['source']})")
+        except Exception as e:
+            print(f"[ACR] Play log write error: {e}")
+        self._session_start = None
+        self._session_uid = None
+        self._session_source = None
+
+    def _set_game_state(self, uid_int, virtual):
+        """Mark a card as 'plugged' -- from a real tap (virtual=False) or
+        from the HTTP API (virtual=True). Shared by every caller that
+        makes a game appear present to ES.
+
+        If something else is already plugged with a *different* uuid,
+        force a 'removed' edge first: a real physical swap always has
+        this gap for free (you can't have two cards on the reader at
+        once, so the poll loop sees 'no card' for a few cycles between
+        them) -- but an in-place uuid change while 'plugged' stays
+        continuously true would not, and it's unverified whether ES's
+        card-reader driver reacts to anything other than the 'plugged'
+        edge. The API (and a same-poll-cycle hardware swap, which hits
+        this same branch) must fake that gap explicitly.
+
+        A repeat call for the game that's already running is a no-op
+        (not just skipping the edge trick) so it can't reset the
+        play-log session's start time or flip its recorded source."""
+        with self._lock:
+            if self.plugged and self.uuid == uid_int:
+                return
+            if self.plugged:
+                self._session_close()
+                self.plugged = False
+                # Also clear uuid (not just after the sleep below) so
+                # write_state() clears 'association' too during the
+                # interim -- matching a real removal exactly, same as
+                # _clear_game_state. Leaving the old association in
+                # place during this gap is suspected of being why one
+                # API-to-API switch worked (the previous game was real)
+                # and a later one didn't (ES/RetroArch may need to see
+                # 'association' actually go empty, not just 'plugged'
+                # flip, to register a genuine removal).
+                self.uuid = 0
+                self.write_state()
+                time.sleep(0.3)
+            self.plugged = True
+            self.uuid = uid_int
+            self.virtual_card = virtual
+            self.write_state()
+            self._session_open(uid_int, 'api' if virtual else 'physical')
+        self.led_command('green', buzz=self.buzzer)
+
+    def _clear_game_state(self):
+        """Mark no card as plugged -- real removal or an explicit
+        API 'stop'. Shared by every caller that returns ES to the menu."""
+        with self._lock:
+            if self.plugged:
+                self._session_close()
+            self.plugged = False
+            self.uuid = 0
+            self.virtual_card = False
+            self.write_state()
+        self.led_command('red')
+
+    def run_whitelisted_script(self, script):
+        """Validate and launch one of ACTIONS_DIR's whitelisted scripts.
+        Shared by the real admin-window tap flow (run_action_now) and the
+        HTTP API. Returns True iff the script was actually started."""
+        if not SCRIPT_NAME_RE.match(script):
+            print(f"[ACR] REFUSED (name not whitelisted): {script!r}")
+            self.led_command('red')
+            return False
+        script_path = os.path.join(ACTIONS_DIR, script)
+        if not os.path.isfile(script_path):
+            print(f"[ACR] REFUSED (not found): {script_path}")
+            self.led_command('red')
+            return False
+        try:
+            # /recalbox/share is exFAT (fmask=0133): every file is
+            # permanently rw-r--r--, chmod +x is a no-op there, so we
+            # must invoke the interpreter explicitly rather than exec
+            # the script directly.
+            with self._lock, open("/tmp/nfc-acr.log", "a") as logf:
+                subprocess.Popen(
+                    ["/bin/sh", script_path],
+                    cwd=ACTIONS_DIR,
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            print(f"[ACR] Action started: {script_path}")
+            self.led_command('green', buzz=self.buzzer)
+            return True
+        except Exception as e:
+            print(f"[ACR] Action start error: {e}")
+            self.led_command('red')
+            return False
+
+    # ---------------------------------------------------- HTTP API hooks ---
+    # Called from api_server.py's request handler (a different thread).
+    # Everything here just reads actions.json/associations.json state
+    # already loaded by the poll loop, or calls the same shared methods a
+    # real card tap would -- no new allow-listing logic.
+
+    def api_list_actions(self):
+        with self._lock:
+            return {uid: dict(a) for uid, a in self.actions.items()}
+
+    def api_list_games(self):
+        with self._lock:
+            return dict(self.associations)
+
+    def _find_action(self, key):
+        key_u = key.upper()
+        if key_u in self.actions:
+            return key_u, self.actions[key_u]
+        for uid, a in self.actions.items():
+            if a.get("label", "").lower() == key.lower():
+                return uid, a
+        return None, None
+
+    def api_run_action(self, key):
+        full_uid, action = self._find_action(key)
+        if not action:
+            return False, f"unknown action: {key!r}"
+        script = action.get("script", "")
+        ok = self.run_whitelisted_script(script)
+        return ok, (f"started {script}" if ok else f"refused: {script}")
+
+    def api_launch_game(self, uid_key):
+        uid_str = str(uid_key).strip()
+        if uid_str not in self.associations:
+            return False, f"unknown game UID: {uid_str}"
+        try:
+            uid_int = int(uid_str)
+        except ValueError:
+            return False, f"invalid UID: {uid_str}"
+        self._set_game_state(uid_int, virtual=True)
+        name = self.associations[uid_str].rsplit('/', 1)[-1]
+        return True, f"launched {name}"
+
+    def api_stop_game(self):
+        self._clear_game_state()
+        return True, "stopped"
+
+    def api_play_log(self, limit=50):
+        """Most recent completed play sessions, newest first. Reads the
+        file fresh each call -- at most a handful of sessions a day, no
+        need to cache."""
+        try:
+            with open(PLAYLOG_FILE) as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            return []
+        entries = []
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                continue
+        entries.reverse()
+        return entries
+
     def run_action_now(self, cls, full_uid, uid_int):
         """cls is 'action' (run a whitelisted script) or 'restricted'
         (forward the game to ES exactly like a normal game card would be
@@ -434,38 +671,9 @@ class ACRDaemon:
         self.confirm_blink()
 
         if cls == 'restricted':
-            self.plugged = True
-            self.uuid = uid_int
-            self.write_state()
-            self.led_command('green', buzz=self.buzzer)
+            self._set_game_state(uid_int, virtual=False)
         else:
-            if not SCRIPT_NAME_RE.match(script):
-                print(f"[ACR] REFUSED (name not whitelisted): {script!r}")
-                self.led_command('red')
-            else:
-                script_path = os.path.join(ACTIONS_DIR, script)
-                if not os.path.isfile(script_path):
-                    print(f"[ACR] REFUSED (not found): {script_path}")
-                    self.led_command('red')
-                else:
-                    try:
-                        # /recalbox/share is exFAT (fmask=0133): every file
-                        # is permanently rw-r--r--, chmod +x is a no-op
-                        # there, so we must invoke the interpreter
-                        # explicitly rather than exec the script directly.
-                        with open("/tmp/nfc-acr.log", "a") as logf:
-                            subprocess.Popen(
-                                ["/bin/sh", script_path],
-                                cwd=ACTIONS_DIR,
-                                stdout=logf,
-                                stderr=subprocess.STDOUT,
-                                start_new_session=True,
-                            )
-                        print(f"[ACR] Action started: {script_path}")
-                        self.led_command('green', buzz=self.buzzer)
-                    except Exception as e:
-                        print(f"[ACR] Action start error: {e}")
-                        self.led_command('red')
+            self.run_whitelisted_script(script)
 
         self.close_window("consumed")
 
@@ -521,22 +729,26 @@ class ACRDaemon:
                         # Normal game cards are completely unaffected by
                         # the admin window -- always launch immediately,
                         # window open or not, and never consume it.
-                        self.plugged = True
-                        self.uuid = uid
-                        self.write_state()
-                        self.led_command('green', buzz=self.buzzer)
+                        if self.nfc_games:
+                            self._set_game_state(uid, virtual=False)
+                        else:
+                            print(f"[ACR] game card ignored "
+                                  f"(nfc_games disabled): {full_uid}")
                     else:
                         self.handle_card_tap(cls, full_uid, uid)
             else:
                 self._miss_count += 1
                 if self._miss_count >= 3 and self._cur_full_uid is not None:
                     self._cur_full_uid = None
-                    if self.plugged:
-                        self.plugged = False
-                        self.uuid = 0
-                        self.write_state()
+                    # Only auto-clear a card that a *real* tap plugged in.
+                    # An API-launched game (virtual_card=True) must survive
+                    # "no physical card seen" -- it only ever ends via an
+                    # explicit API stop or a genuine new tap taking over
+                    # (handled above, which always calls _set_game_state
+                    # with virtual=False and so clears the flag itself).
+                    if self.plugged and not self.virtual_card:
+                        self._clear_game_state()
                         print("[ACR] Card removed")
-                        self.led_command('red')
                     # action/admin card removal: an open window keeps
                     # running, per spec it must survive the card being
                     # lifted off.
@@ -560,6 +772,32 @@ class ACRDaemon:
         self.write_state()
         print("[ACR] Daemon stopped")
 
+    def start(self):
+        """Process entry point: start whichever subsystems are enabled in
+        config.json and keep the process alive until SIGTERM, regardless
+        of which (if any) of them actually started."""
+        threads = []
+        if self.nfc_games or self.nfc_actions:
+            t = threading.Thread(target=self.run, name="nfc-poll", daemon=True)
+            t.start()
+            threads.append(t)
+        else:
+            print("[ACR] NFC hardware polling disabled "
+                  "(nfc_games=false, nfc_actions=false)")
+
+        if self.api_enabled:
+            import api_server
+            api_server.start(self)
+            print(f"[ACR] API listening on :{self.api_port}")
+        else:
+            print("[ACR] API disabled")
+
+        while self.running:
+            time.sleep(1)
+
+        for t in threads:
+            t.join(timeout=5)
+
 
 if __name__ == "__main__":
-    ACRDaemon().run()
+    ACRDaemon().start()

@@ -19,12 +19,15 @@ Usage:
   manage_actions.py add-restricted
   manage_actions.py new-script NAME [--label LABEL]
   manage_actions.py remove UID
+  manage_actions.py config [--nfc-games on|off] [--nfc-actions on|off]
+                            [--api on|off] [--api-port PORT] [--regen-token]
 """
 
 import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -36,6 +39,7 @@ INSTALL_DIR = "/recalbox/share/system/nfc-daemon"
 ACTIONS_FILE = os.path.join(INSTALL_DIR, "actions.json")
 ACTIONS_DIR = os.path.join(INSTALL_DIR, "actions")
 ASSOC_FILE = os.path.join(INSTALL_DIR, "associations.json")
+CONFIG_FILE = os.path.join(INSTALL_DIR, "config.json")
 BACKUP_DIR = os.path.join(INSTALL_DIR, "config-backups")
 SERVICE_SCRIPT = "/etc/init.d/S32nfc-acr"
 
@@ -92,6 +96,34 @@ def load_associations():
             return json.load(f)
     except Exception:
         return {}
+
+
+DEFAULT_CONFIG = {"buzzer": False, "nfc_games": True, "nfc_actions": True,
+                   "api": {"enabled": False, "port": 8080, "token": ""}}
+
+
+def load_config():
+    if not os.path.isfile(CONFIG_FILE):
+        return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    with open(CONFIG_FILE) as f:
+        cfg = json.load(f)
+    cfg.setdefault("buzzer", False)
+    cfg.setdefault("nfc_games", True)
+    cfg.setdefault("nfc_actions", True)
+    cfg.setdefault("api", {})
+    cfg["api"].setdefault("enabled", False)
+    cfg["api"].setdefault("port", 8080)
+    cfg["api"].setdefault("token", "")
+    return cfg
+
+
+def save_config(cfg):
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, CONFIG_FILE)
+    print(f"[ok] saved {CONFIG_FILE}")
 
 
 # ------------------------------------------------------------- USB/NFC ---
@@ -394,6 +426,43 @@ def cmd_remove(args):
     service("restart")
 
 
+def cmd_config(args):
+    cfg = load_config()
+    changed = False
+
+    if args.nfc_games is not None:
+        cfg["nfc_games"] = (args.nfc_games == "on")
+        changed = True
+    if args.nfc_actions is not None:
+        cfg["nfc_actions"] = (args.nfc_actions == "on")
+        changed = True
+    if args.api is not None:
+        cfg["api"]["enabled"] = (args.api == "on")
+        changed = True
+    if args.api_port is not None:
+        cfg["api"]["port"] = args.api_port
+        changed = True
+    if args.regen_token:
+        cfg["api"]["token"] = secrets.token_hex(24)
+        changed = True
+
+    print("Aktuelle Konfiguration:")
+    print(f"  buzzer:      {cfg['buzzer']}")
+    print(f"  nfc_games:   {cfg['nfc_games']}")
+    print(f"  nfc_actions: {cfg['nfc_actions']}")
+    print(f"  api.enabled: {cfg['api']['enabled']}")
+    print(f"  api.port:    {cfg['api']['port']}")
+    print(f"  api.token:   {cfg['api']['token'] or '(keiner gesetzt)'}")
+
+    if changed:
+        save_config(cfg)
+        if cfg["api"]["enabled"] and not cfg["api"]["token"]:
+            print("[!] API ist aktiviert, aber kein Token gesetzt -- Aufrufe "
+                  "werden mit 503 abgelehnt. Mit --regen-token eins erzeugen.")
+        print("[..] Starte Daemon neu, damit die Aenderung sofort greift...")
+        service("restart")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -412,6 +481,15 @@ def main():
     p_rm = sub.add_parser("remove")
     p_rm.add_argument("uid")
     p_rm.set_defaults(func=cmd_remove)
+
+    p_cfg = sub.add_parser("config",
+                            help="nfc_games/nfc_actions/api-Flags und API-Token verwalten")
+    p_cfg.add_argument("--nfc-games", dest="nfc_games", choices=["on", "off"], default=None)
+    p_cfg.add_argument("--nfc-actions", dest="nfc_actions", choices=["on", "off"], default=None)
+    p_cfg.add_argument("--api", dest="api", choices=["on", "off"], default=None)
+    p_cfg.add_argument("--api-port", dest="api_port", type=int, default=None)
+    p_cfg.add_argument("--regen-token", action="store_true")
+    p_cfg.set_defaults(func=cmd_config)
 
     args = p.parse_args()
     args.func(args)
