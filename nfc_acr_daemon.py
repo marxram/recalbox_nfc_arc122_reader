@@ -532,6 +532,24 @@ class ACRDaemon:
                 self.uuid = 0
                 self.write_state()
                 time.sleep(0.3)
+            # Pad (re)assignment happens here, AFTER the state above is
+            # cleared to "nothing plugged" (or there never was anything
+            # plugged) and BEFORE the new uid is written below. This
+            # order matters: assign_controllers may restart
+            # EmulationStation, and a freshly-started ES immediately
+            # re-launches whatever the fake-card-reader files currently
+            # say is plugged -- doing this with the OLD uid still
+            # written (i.e. before the block above, which is where this
+            # call used to live) made a fresh ES re-launch the game we
+            # were switching AWAY from instead of idling at the menu
+            # and waiting for the new tap below (caught live 2026-10-19:
+            # switching Mario Kart 64 -> Donkey Kong 64 relaunched Mario
+            # Kart 64 instead).
+            try:
+                import assign_controllers
+                assign_controllers.apply_for_launch(uid_int)
+            except Exception as e:
+                print(f"[AssignControllers] skipped (non-fatal): {e}")
             self.plugged = True
             self.uuid = uid_int
             self.virtual_card = virtual

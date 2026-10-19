@@ -306,6 +306,161 @@ Profiles are just a set of VID:PIDs that stay enabled; defined in
 - `snes` — `0810:e501` and `081f:e401`
 - `all` — every known template (reset)
 
+## Automatic per-game controller assignment (`pad_registry.py` / `assign_controllers.py`)
+
+**Status (2026-10-19): Stage 1 built, deployed, correctness verified
+live and repeatedly. Latency on configuration-change launches is not
+yet fully tuned — see "Known open gap" below. User is trial-using it
+and will decide whether to keep it, tune it further, or move to a
+powered/per-port-switched USB hub instead (the decision logic below —
+which pads, what priority, what player slot — stays reusable either
+way; only the enable/disable mechanism would change).** Rollback if
+needed: the pre-feature daemon is backed up on the device at
+`/recalbox/share/system/nfc-daemon/code-backups/20261019-213628/
+nfc_acr_daemon.py` — restore it and `/etc/init.d/S32nfc-acr restart`;
+`pad_registry.py`/`assign_controllers.py` can be left in place unused.
+
+### Why, beyond `pad_profiles.py`
+
+The target setup has up to 7 pads permanently connected: 2x N64
+(USB-only), 2x SNES (USB-only), 1x Mega Drive pad (BT or USB), 2x
+8BitDo SF30 Pro (BT or USB). `pad_profiles.py` above only offers two
+fixed, manually-triggered profiles and doesn't know how many players a
+given *game* actually needs or which pad should land on which player
+slot. This feature decides that automatically, per launch: only the
+pads a game can use get enabled, in a fixed priority order (that
+system's native pad(s) first, then cross-system fallback pads), so
+e.g. the Mega Drive pad is always player 1 on Mega Drive games with the
+SNES pad filling in as player 2 if needed, and an N64 game never sees a
+stray SNES pad registered as an extra, unused controller.
+
+### Files
+
+- `pad_registry.py` — pad identities (extends, does not duplicate,
+  `configure_pads.py`'s `DEVICE_TEMPLATES`: which system each pad is
+  *native* for vs. a valid cross-system *fallback*), USB detection (the
+  same sysfs scan as above) and Bluetooth detection (`bluetoothctl info
+  <mac>`, parses `Connected: yes/no`), and per-pad enable/disable
+  (reuses `pad_profiles.py`'s `usbhid` bind/unbind functions directly).
+  The Mega Drive pad's VID:PID is **not yet captured** (hardware wasn't
+  connected to this project yet as of 2026-10-19) — don't guess it,
+  capture it the same hands-on way every other template here was.
+- `game_player_counts.json` — `{uid: {slug, title, system,
+  players_max}}` for all 59 registered UIDs, derived from
+  RetroKnowledge's already-researched `players.max` (no new research
+  needed) joined against the live device's `associations.json` by
+  title (11 UIDs needed an explicit manual title-variant override,
+  verified by hand, not guessed — see the Dev-machine `game_steckbriefe`
+  project's `RetroKnowledge/overview.json` for the source of truth if
+  this ever needs regenerating).
+- `assign_controllers.py` — `apply_for_launch(uid_int)`: looks up the
+  desired player count, builds the priority-ordered pad list, truncates
+  to that count, disables every other known pad, (re-)binds the chosen
+  ones in priority order, and — only if that configuration actually
+  differs from the last-applied one (cached, so repeat launches with an
+  unchanged configuration skip all of this) — stops EmulationStation,
+  lets the new binding take effect, and restarts it.
+
+### Integration point: the NFC daemon itself, not a Recalbox hook
+
+Recalbox has a built-in `[rungame](sync)` userscript mechanism
+(`/recalbox/share/userscripts/`) that would seem like the natural place
+for this, but it runs as a *child process of EmulationStation itself*,
+blocked waiting for it to exit — and the mechanism below needs an
+actual ES restart to take effect (`Settings` — which backs
+`es_settings.cfg` — loads its file exactly once, at construction,
+confirmed by reading EmulationStation's own source). Having that hook
+restart its own parent is self-referential and risky. Instead,
+`assign_controllers.apply_for_launch()` is called from
+`nfc_acr_daemon.py`'s `_set_game_state()`, which already owns exactly
+when a tap gets simulated for *both* a real physical tap and an
+API-triggered launch — one change covers both paths.
+
+**Placement inside `_set_game_state()` matters**: the call sits *after*
+the existing "force removed edge" block (which clears the fake-card-
+reader files to "nothing plugged" when switching from one game to
+another), not before it. Restarting ES while the OLD game's uid was
+still written there made the freshly-started ES immediately re-launch
+the game being switched *away from* — caught live, see the comment at
+the call site.
+
+### Why no `es_settings.cfg` player pinning
+
+Confirmed by reading `recalbox/recalbox-emulationstation`'s
+`InputManager.cpp` (`configureEmulators()`): `es_settings.cfg`'s `INPUT
+P{n}NAME`/`INPUT P{n}GUID` fields can pin a specific pad *model* to a
+player slot, but there is no per-port/physical-path field at all — they
+cannot distinguish our 2 identical N64 pads (or 2 identical SNES pads)
+from each other. The actual lever for *those* is simpler: when no pin
+matches, ES assigns players by SDL device-index order, fixed once at
+its own startup. Since this feature always controls exactly which pads
+are bound, in exactly what order, right before restarting ES, no
+explicit `es_settings.cfg` writing is needed at all — confirmed against
+real `frontend.log` entries matching bind order to the resulting
+`-p1physicalpath`/`-p2physicalpath` in actual launch commands.
+
+### Two real bugs found live, fixed (not just theorized)
+
+1. **Switching between two actively-running games crashed ES**
+   (duplicate SDL2 init, confirmed via `frontend.log`'s `[SDL2] Fatal
+   error`), because `S31emulationstation stop` does nothing useful
+   while a game is running (ES is blocked on its own emulator child).
+   Fixed: `_stop_running_game_if_any()` SIGTERMs (then SIGKILLs if
+   needed) the actual `retroarch`/`mupen64plus`/`emulatorlauncher.pyc`
+   process tree before ever touching ES's own lifecycle — called
+   unconditionally on every launch (see #2 for why that has to be
+   unconditional).
+2. **Reproduced and fixed this project's pre-existing, previously-
+   unsolved "direct API-to-API switch is unreliable" bug** (see the
+   Remote-control API section above) — root cause confirmed live: the
+   old emulator is simply never told to exit; the daemon's "force
+   removed edge" alone (association cleared, 0.3s sleep) isn't enough.
+   The first version of this fix only ran the emulator-kill step when
+   the pad *configuration* needed to change, so switching between two
+   games needing the *same* configuration (common — e.g. two different
+   1-player N64 games) still silently kept the old game running. Fixed
+   by making the emulator-kill step unconditional, independent of
+   whether pad reconfiguration follows — this now closes the documented
+   switch-reliability gap automatically on every launch, not just a
+   client-side workaround anymore.
+3. **Bonus**: this feature's own repeated ES stop/start cycling exposes
+   the project's already-known stale-`/var/run/emulationstation.pid`
+   gotcha (see "Known hardware/platform gotchas" below) far more often
+   than normal use ever did — `S31emulationstation stop` silently
+   no-ops on a stale pidfile. `_es_stop()` no longer trusts the init
+   script alone (falls back to SIGTERM on the real PID found via
+   `pgrep`); a successful start now also rewrites the pidfile to the
+   real PID, keeping the *next* cycle sane.
+
+### Known open gap: latency on configuration-change launches
+
+Cache-hit launches (pad configuration unchanged from the last one) are
+solidly fast, ~1s. A launch that genuinely needs to change which pads
+are bound — including from a completely idle starting state, not just
+switching away from an active game — is currently taking **~10s**, not
+the ~2s this same device measured in an isolated test earlier the same
+session, before any of this code existed. Not explained by the two bugs
+above (confirmed fixed; this happens even in clean runs with no
+warnings logged). Root cause not fully pinned down — `S31emulationstation
+stop` itself appears to take longer once this feature's cycling is
+layered on top than the earlier isolated measurement suggested. Good
+next step: instrument `_es_stop()`/`_es_start_and_wait_ready()` with
+finer-grained internal timestamps on a freshly-booted device, or
+consider managing ES's process directly instead of going through the
+`S31emulationstation` init-script wrapper at all.
+
+### Not yet built
+
+- Stage 2: when a game wants more players than are currently available
+  (e.g. a 4-player N64 game with only 2 pads live), show an on-screen
+  image/message and wait a few seconds before launching anyway — not
+  started, deferred until the SNES/Mega-Drive pads are physically
+  connected so it can be tested meaningfully.
+- Whether Recalbox's snes9x core here can actually route 4 physical
+  controllers to a SNES game via software multitap — `super_bomberman`
+  genuinely has `players_max: 4` in the data (confirmed, not assumed),
+  so the *game* side is real; the *emulator* side is unverified.
+
 ## Restricted (admin-gated) games
 
 Currently configured on this device (names only — see the live
@@ -555,17 +710,41 @@ happens, document the chosen approach (env var? PiPhone config.yaml
 keys? a one-time manual copy?) here or in PiPhone's own repo — not
 decided yet.
 
-**Remote-API test cases still open (picking up next session):**
-- Physically remove a card while an API-launched game is running, and
-  confirm the API game survives (the `virtual_card` logic is covered
-  by code/tests of the *daemon's own state*, but not yet observed
-  end-to-end against a real card on real hardware).
-- Debug the direct-switch reliability issue noted above (works
+**Remote-API test cases:**
+
+- [x] **Physically remove a card while an API-launched game is
+  running — confirmed survives, 2026-10-19, live on real hardware.**
+  Sequence actually run: physical SimCity card in reader (`virtual_card=
+  False`) -> `POST /games/1038113728/launch` (F-Zero) while SimCity
+  card still physically present -> confirmed F-Zero running (native
+  `:81/api/status`) and SimCity's session correctly closed/logged
+  (`Play session logged: Sim City (G).zip (13.6s, physical)`) -> **the
+  still-present SimCity card physically removed** -> F-Zero kept
+  running undisturbed: `plugged=true`/UID unchanged in daemon status,
+  native status still F-Zero, the real `retroarch`/`snes9x` process for
+  F-Zero still alive (`ps aux`), no "Card removed" line ever appeared
+  in the log. The `virtual_card` skip-logic (poll loop ignoring "no
+  card seen" while `virtual_card=True`) works as designed on real
+  hardware, not just in the daemon's own state logic.
+- [x] **Bonus, same session: a genuine new physical tap immediately
+  takes over from an API-launched game — confirmed.** With F-Zero still
+  running (API-launched), a third physical card (Mario Kart 64) was
+  tapped: log shows `Card detected... class=game` immediately followed
+  by `Play session logged: F-Zero (E).zip (69.1s, api)` (clean
+  close+log of the API session, `source: api`), native status switched
+  to Mario Kart 64. No special handling needed, no stop-then-launch
+  required for the *physical-tap-overrides-API* direction specifically
+  (only the API-to-API direct-switch direction below is the known
+  unreliable one).
+- [ ] Debug the direct-switch reliability issue noted above (API launch
+  while a *different API-launched* game is already running — works
   sometimes, not others) rather than just routing around it with
-  stop-then-launch.
-- Exercise `nfc_games`/`nfc_actions`/`api.enabled` toggled individually
-  and in combination (e.g. confirm no USB claim when both NFC flags
-  are off, port not listening when `api.enabled` is false).
-- Simulate a Recalbox update (`rm /etc/init.d/S32nfc-acr`, run
+  stop-then-launch. Note: the physical-tap-overrides-API path tested
+  above was reliable every time; the unreliable case is specifically
+  API-launch-over-API-launch, not yet retested this session.
+- [ ] Exercise `nfc_games`/`nfc_actions`/`api.enabled` toggled
+  individually and in combination (e.g. confirm no USB claim when both
+  NFC flags are off, port not listening when `api.enabled` is false).
+- [ ] Simulate a Recalbox update (`rm /etc/init.d/S32nfc-acr`, run
   `install_nfc.sh --update`) and confirm the daemon **and** the API
   both come back with the preserved config, no second manual step.

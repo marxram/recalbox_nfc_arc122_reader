@@ -75,6 +75,12 @@ if [ "$MODE" = "update" ]; then
         warn "API module missing: $INSTALL_DIR/api_server.py"
         MISSING=1
     fi
+    for f in pad_registry.py assign_controllers.py configure_pads.py pad_profiles.py game_player_counts.json; do
+        if [ ! -f "$INSTALL_DIR/$f" ]; then
+            warn "Controller-assignment file missing: $INSTALL_DIR/$f"
+            MISSING=1
+        fi
+    done
     if [ ! -f "$INSTALL_DIR/config.json" ]; then
         warn "Config missing: $INSTALL_DIR/config.json"
         MISSING=1
@@ -95,11 +101,18 @@ if [ "$MODE" = "install" ] || [ "$MODE" = "force" ] || [ "$NEED_FULL_INSTALL" -e
 
     mkdir -p "$INSTALL_DIR"
 
-    # Download or copy daemon + its API module (both land in the same
-    # persistent dir, both need to survive a Recalbox update the same way)
+    # Download or copy the daemon and every module it imports (all land
+    # in the same persistent dir, all need to survive a Recalbox update
+    # the same way)
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-    for f in nfc_acr_daemon.py api_server.py; do
+    # pad_registry.py/assign_controllers.py (automatic per-game controller
+    # assignment) are imported by nfc_acr_daemon.py itself now, and those
+    # in turn import configure_pads.py/pad_profiles.py -- all 5 are hard
+    # daemon dependencies, not optional action-script helpers, so they
+    # need the same survive-updates treatment as the daemon itself.
+    for f in nfc_acr_daemon.py api_server.py pad_registry.py assign_controllers.py \
+             configure_pads.py pad_profiles.py game_player_counts.json; do
         echo -n "Installing $f... "
         INSTALLED=0
 
