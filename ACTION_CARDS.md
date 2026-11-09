@@ -516,7 +516,7 @@ wrong player. `_restart_reason()` implements exactly that:
 |---|---|
 | N64 | players 1..n are not the N64 pads (then the SF30s, if connected — that's the 3/4-player case), or the N64 pad's `es_input.cfg` block isn't the `n64` profile |
 | SNES | players 1..n are not the SNES pads (then SF30s, …), or the N64 pad block isn't the `retro` profile |
-| Mega Drive | an M30 (USB or BT) is connected and is not player 1. No M30 → play with the current order |
+| Mega Drive | an M30 (USB or BT) is connected and is not player 1. No M30: only if player 1 is an N64 pad (then the SNES pads go in front), otherwise keep the current order |
 | anything else | never |
 
 n = the game's `players_max`. Only connected pads count: an N64

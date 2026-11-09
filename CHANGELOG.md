@@ -8,8 +8,9 @@
 - **ES is restarted only by the user's rule** (`_restart_reason()`):
   N64 ↔ SNES switch (N64 or SNES pads must be in front, N64 pad
   profile must match), SF30s for N64 3–4 players if connected, M30 as
-  Mega Drive player 1 if connected. Otherwise, e.g. Mega Drive without
-  M30 or Vectrex, the running ES is kept.
+  Mega Drive player 1 if connected; Mega Drive without M30 only if an
+  N64 pad is player 1 (SNES pads go in front). Otherwise, e.g. Vectrex,
+  the running ES is kept.
 - The decision uses the real state (remembered slots in
   `recalbox.conf` reduced to connected pads, plus the N64 pad's
   `es_input.cfg` block) instead of the last-launch cache

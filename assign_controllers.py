@@ -437,8 +437,9 @@ def _restart_reason(system_key, chosen):
         (n = players needed, as far as such pads are connected; for N64
         3-4 players that includes the SF30s, but only if connected) and
         the N64 pad's button profile must match the console.
-      * Mega Drive: only if an M30 (USB or BT) is connected and is not
-        player 1. Without an M30: play with whatever order is active.
+      * Mega Drive: if an M30 (USB or BT) is connected and is not
+        player 1; without an M30 only if player 1 is an N64 pad (then
+        the SNES pads go in front). Otherwise keep the current order.
       * Every other system: never."""
     if system_key in ("n64", "snes"):
         want = [_chosen_cls(c) for c in chosen]
@@ -450,11 +451,17 @@ def _restart_reason(system_key, chosen):
             return f"N64 pad profile is not '{profile}'"
         return None
     if system_key == "megadrive":
-        if not chosen or _chosen_cls(chosen[0]) != "m30":
-            return None  # no M30 connected -> keep current order
         have = _current_player_classes()[:1]
-        if have != ["m30"]:
-            return f"M30 connected but player 1 is {have}"
+        if chosen and _chosen_cls(chosen[0]) == "m30":
+            if have != ["m30"]:
+                return f"M30 connected but player 1 is {have}"
+            return None
+        # No M30 (user, 2026-11-09, option b): an N64 pad on player 1
+        # (left over from an N64 game, with its N64 button profile) is
+        # not acceptable -- restart so the SNES pads come first. Any
+        # other player 1 is kept.
+        if have == ["n64"] and chosen and _chosen_cls(chosen[0]) != "n64":
+            return "no M30, but player 1 is an N64 pad"
         return None
     return None
 
