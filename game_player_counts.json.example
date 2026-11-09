@@ -1,0 +1,14 @@
+{
+  "1000000001": {
+    "slug": "mario_kart_64",
+    "title": "Mario Kart 64",
+    "system": "N64",
+    "players_max": 4
+  },
+  "1000000002": {
+    "slug": "f_zero",
+    "title": "F-Zero",
+    "system": "SNES",
+    "players_max": 1
+  }
+}

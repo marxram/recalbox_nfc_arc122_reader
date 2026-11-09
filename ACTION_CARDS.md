@@ -346,7 +346,8 @@ stray SNES pad registered as an extra, unused controller.
   The Mega Drive pad's VID:PID is **not yet captured** (hardware wasn't
   connected to this project yet as of 2026-10-19) — don't guess it,
   capture it the same hands-on way every other template here was.
-- `game_player_counts.json` — `{uid: {slug, title, system,
+- `game_player_counts.json` (gitignored, real card UIDs; format in
+  `game_player_counts.json.example`) — `{uid: {slug, title, system,
   players_max}}` for all 59 registered UIDs, derived from
   RetroKnowledge's already-researched `players.max` (no new research
   needed) joined against the live device's `associations.json` by
@@ -354,6 +355,9 @@ stray SNES pad registered as an extra, unused controller.
   verified by hand, not guessed — see the Dev-machine `game_steckbriefe`
   project's `RetroKnowledge/overview.json` for the source of truth if
   this ever needs regenerating).
+- `bt_pads.json` (gitignored, real BT MACs; format in
+  `bt_pads.json.example`) — the Bluetooth pads `pad_registry.BT_PADS`
+  loads at import, in priority order. Missing file = no BT pads.
 - `assign_controllers.py` — `apply_for_launch(uid_int, before_es_start)`:
   looks up the system and player count, builds the priority-ordered
   pad list and decides from the **real current state** whether ES must

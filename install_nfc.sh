@@ -75,7 +75,7 @@ if [ "$MODE" = "update" ]; then
         warn "API module missing: $INSTALL_DIR/api_server.py"
         MISSING=1
     fi
-    for f in pad_registry.py assign_controllers.py configure_pads.py pad_profiles.py game_player_counts.json; do
+    for f in pad_registry.py assign_controllers.py configure_pads.py pad_profiles.py; do
         if [ ! -f "$INSTALL_DIR/$f" ]; then
             warn "Controller-assignment file missing: $INSTALL_DIR/$f"
             MISSING=1
@@ -111,8 +111,21 @@ if [ "$MODE" = "install" ] || [ "$MODE" = "force" ] || [ "$NEED_FULL_INSTALL" -e
     # in turn import configure_pads.py/pad_profiles.py -- all 5 are hard
     # daemon dependencies, not optional action-script helpers, so they
     # need the same survive-updates treatment as the daemon itself.
+    # Device-specific data (real card UIDs, BT pad MACs) is gitignored and
+    # never downloaded -- copied only if the installer finds your own
+    # copy next to it. See game_player_counts.json.example and
+    # bt_pads.json.example for the format.
+    for f in game_player_counts.json bt_pads.json; do
+        if [ -f "$SCRIPT_DIR/$f" ]; then
+            cp -f "$SCRIPT_DIR/$f" "$INSTALL_DIR/"
+            echo "Installing $f (local data)... OK"
+        elif [ ! -f "$INSTALL_DIR/$f" ]; then
+            warn "$f not found -- see $f.example (controller assignment works without it, but does nothing)"
+        fi
+    done
+
     for f in nfc_acr_daemon.py api_server.py pad_registry.py assign_controllers.py \
-             configure_pads.py pad_profiles.py game_player_counts.json; do
+             configure_pads.py pad_profiles.py; do
         echo -n "Installing $f... "
         INSTALLED=0
 

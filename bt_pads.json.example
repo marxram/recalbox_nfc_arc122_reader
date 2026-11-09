@@ -1,0 +1,20 @@
+{
+  "00:00:00:00:00:01": {
+    "cls": "m30_bt",
+    "label": "M30 (Mega Drive)",
+    "es_name": "8BitDo M30 gamepad",
+    "es_guid": "05009b42c82d00005106000000010000"
+  },
+  "00:00:00:00:00:02": {
+    "cls": "sf30_bt",
+    "label": "SF30 Pro #1",
+    "es_name": "8Bitdo SF30 Pro",
+    "es_guid": "05005f80c82d00000161000000010000"
+  },
+  "00:00:00:00:00:03": {
+    "cls": "sf30_bt",
+    "label": "SF30 Pro #2",
+    "es_name": "8Bitdo SF30 Pro",
+    "es_guid": "05005f80c82d00000161000000010000"
+  }
+}

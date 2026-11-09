@@ -12,6 +12,7 @@ valid FALLBACK on, and Bluetooth identity for the pads that have one.
 The N64/SNES pads below also have configure_pads.py templates; the
 8BitDo pads work with ES's own stored mapping and need none.
 """
+import json
 import os
 import subprocess
 import sys
@@ -45,17 +46,21 @@ USB_PADS = {
                   "es_guid": "0300260cc82d00000160000011010000"},
 }
 
-BT_PADS = {
-    "00:00:00:00:00:01": {"cls": "m30_bt", "label": "M30 (Mega Drive)",
-                          "es_name": "8BitDo M30 gamepad",
-                          "es_guid": "05009b42c82d00005106000000010000"},
-    "00:00:00:00:00:02": {"cls": "sf30_bt", "label": "SF30 Pro #1",
-                          "es_name": "8Bitdo SF30 Pro",
-                          "es_guid": "05005f80c82d00000161000000010000"},
-    "00:00:00:00:00:03": {"cls": "sf30_bt", "label": "SF30 Pro #2",
-                          "es_name": "8Bitdo SF30 Pro",
-                          "es_guid": "05005f80c82d00000161000000010000"},
-}
+# Bluetooth pads by MAC. The real MACs are device-specific and kept out
+# of git: they live in bt_pads.json next to this file (gitignored; see
+# bt_pads.json.example for the format -- same dict, in priority order,
+# so "SF30 Pro #1" before "#2"). Missing/unreadable file = no BT pads
+# (USB pads keep working).
+def _load_bt_pads():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bt_pads.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+BT_PADS = _load_bt_pads()
 
 # Per-system player priority, as pad classes in order (user's rules,
 # 2026-11-09). A class missing from a system's list is never used for
