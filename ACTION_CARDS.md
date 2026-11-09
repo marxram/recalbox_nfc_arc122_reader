@@ -506,6 +506,24 @@ when no SNES pad/SF30 is available).
    `pgrep`); a successful start now also rewrites the pidfile to the
    real PID, keeping the *next* cycle sane.
 
+### Final USB pad layout (verified 2026-11-09)
+
+Fixed setup, left to right, each pad marked with a colour. Verified
+live: one button press per pad, read from its `/dev/input/event*`
+node and that node's USB port (not assumed from the plug order).
+
+| Colour | Pad | USB port (`devicePhysicalPath`) | VID:PID | Player |
+|---|---|---|---|---|
+| Green  | N64  | `1-1.4.1` (`platform-xhci-hcd.0-usb-0:1.4.1:1.0`) | `0e6d:111d` | N64 P1 |
+| Yellow | N64  | `1-1.4.2` | `0e6d:111d` | N64 P2 |
+| Pink   | SNES | `1-1.4.3` | `081f:e401` ("USB gamepad") | SNES P1 |
+| Orange | SNES | `1-1.4.4` | `0810:e501` ("usb gamepad") | SNES P2 |
+
+Left to right matches the hub port order, so the existing rule
+"within one class, USB pads in sysfs order" already gives green before
+yellow and pink before orange. The two N64 pads are identical models;
+only the port tells them apart, so they must stay on these ports.
+
 ### When ES is restarted (v3.10, 2026-11-09)
 
 User's rule: USB pads are always on. Restarting ES (~10–15 s) is only
