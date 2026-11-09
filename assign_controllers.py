@@ -8,30 +8,27 @@ the card tap, for both a real physical tap and an API-triggered launch
 ~/.claude/plans/wild-percolating-anchor.md for the full design and why
 this lives here rather than as a Recalbox `[rungame](sync)` userscript.
 
-Mechanism (deliberately simple for Stage 1 -- no es_settings.cfg
-writing): EmulationStation assigns player slots by SDL device-index
-order established once at its own startup (confirmed by reading
-EmulationStation's own source, es-core/src/InputManager.cpp), as long
-as no INPUT P{n}NAME/GUID pin exists in es_settings.cfg (none do on
-this device). Since this module always decides the exact set of pads
-bound at the moment ES (re)starts, and binds them in the desired
-priority order just before that restart, no explicit pinning is
-needed -- ES's own natural fallback assignment does the rest. Confirm
-this holds via the live verification steps in the plan before trusting
-it blindly.
+Mechanism (v3.10): USB pads stay enabled all the time. ES is restarted
+only when a wanted pad is connected but sits on the wrong player
+(_restart_reason(): N64 <-> SNES switch, SF30s for N64 3-4 players,
+M30 as Mega Drive player 1 -- the user's rule). The restart writes ES's
+own persistent player-slot list in recalbox.conf (emulationstation.padN
+/ padN.path) while ES is stopped. The earlier assumption that ES follows
+SDL device-index order was WRONG (found live 2026-11-09, see
+_write_pad_slots()): its InputMapper keeps remembered slots, which is
+what put the M30 on P1 in Mario Kart 64. Priority per system:
+pad_registry.SYSTEM_PRIORITY.
 
-Caches the last-applied pad set/order (LAST_APPLIED_FILE) so consecutive
-launches needing the identical configuration skip the whole stop/
-reconfigure/start sequence entirely (~1s, confirmed live) -- this is
-what keeps same-system, same-player-count game-to-game switching fast.
-When the configuration DOES need to change, measured ~2s from a genuinely
-idle state, longer (several seconds, bounded by the SIGTERM-then-SIGKILL
-wait in _stop_running_game_if_any()) when an emulator has to be stopped
-first -- unavoidable, switching the active game always takes some real
-time no matter the mechanism.
+The decision is made from the real current state (remembered slots
+reduced to connected pads + the N64 pad's es_input.cfg block), not from
+a cache of the last launch, so a pad switched on or off between games
+is noticed. Same-console game switches normally need no restart (~1s);
+a restart costs ~10-15s, most of it ES's own shutdown.
 """
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -40,7 +37,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pad_registry
 
 PLAYER_COUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_player_counts.json")
-LAST_APPLIED_FILE = "/tmp/assign_controllers_last.json"
 
 # RetroKnowledge's system strings -> pad_registry's lowercase system keys.
 SYSTEM_KEY = {"SNES": "snes", "Mega Drive": "megadrive", "N64": "n64", "Vectrex": "vectrex"}
@@ -57,22 +53,6 @@ def _load_player_counts():
         return {}
 
 
-def _load_last_applied():
-    try:
-        with open(LAST_APPLIED_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def _save_last_applied(applied):
-    try:
-        with open(LAST_APPLIED_FILE, "w", encoding="utf-8") as f:
-            json.dump(applied, f)
-    except OSError as e:
-        print(f"[AssignControllers] could not persist last-applied state: {e}")
-
-
 def _desired_player_count(uid_int):
     entry = _load_player_counts().get(str(uid_int))
     if not entry:
@@ -83,31 +63,126 @@ def _desired_player_count(uid_int):
 def _priority_ordered_pads(system_key):
     """[(identity, kind), ...] -- identity is (vid_pid, devpath,
     physical_path) for USB or a BT MAC string for Bluetooth; kind is
-    'usb' or 'bt'. Native-for-this-system pads first, then fallbacks,
-    each group in find_known_devices()'s stable sysfs-entry-name order
-    (USB) / dict order (BT) -- deterministic, not re-sorted by anything
-    launch-specific, so re-running with the same hardware state always
-    produces the same order."""
+    'usb' or 'bt'. Ordered by pad_registry.SYSTEM_PRIORITY's class list
+    for this system; pads whose class isn't listed for it are left out.
+    Within a class: USB in stable sysfs order, BT in BT_PADS order --
+    deterministic for the same hardware state."""
     usb = pad_registry.usb_connected()
     bt_macs = set(pad_registry.bt_connected())
+    priority = pad_registry.SYSTEM_PRIORITY.get(system_key, pad_registry.DEFAULT_PRIORITY)
 
-    native, fallback = [], []
-    for vid_pid, devpath, phys in usb:
-        cls = pad_registry.PAD_CLASS[vid_pid]
-        item = ((vid_pid, devpath, phys), "usb")
-        if cls["native"] == system_key:
-            native.append(item)
-        elif system_key in cls["fallback"]:
-            fallback.append(item)
+    ordered = []
+    for cls in priority:
+        for vid_pid, devpath, phys in usb:
+            if pad_registry.USB_PADS[vid_pid]["cls"] == cls:
+                ordered.append(((vid_pid, devpath, phys), "usb"))
+        for mac, info in pad_registry.BT_PADS.items():
+            if info["cls"] == cls and mac in bt_macs:
+                ordered.append((mac, "bt"))
+    return ordered
 
-    for mac in pad_registry.SF30_BT_PADS:
-        if mac not in bt_macs:
+
+RECALBOX_CONF = "/recalbox/share/system/recalbox.conf"
+CONF_BACKUP_DIR = "/recalbox/share/system/nfc-daemon/config-backups"
+CONF_BACKUPS_KEEP = 20
+MAX_PAD_SLOTS = 10  # emulationstation.pad0 .. pad9
+_PAD_LINE = re.compile(r"^emulationstation\.pad(\d+)(\.path)?=(.*)$")
+
+
+def _slot_entry(item, kind):
+    """(guid, name, path) exactly as ES stores it in recalbox.conf."""
+    if kind == "bt":
+        info = pad_registry.BT_PADS[item]
+        return (info["es_guid"], info["es_name"], "")
+    vid_pid, _devpath, phys = item
+    info = pad_registry.USB_PADS[vid_pid]
+    return (info["es_guid"], info["es_name"], phys)
+
+
+def _read_pad_slots():
+    """(non-slot lines, [(guid, name, path), ...] in slot order) from
+    recalbox.conf. Raises OSError if unreadable. Read-only, safe while
+    ES runs."""
+    with open(RECALBOX_CONF, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    old = {}
+    keep = []
+    for line in lines:
+        m = _PAD_LINE.match(line)
+        if not m:
+            keep.append(line)
             continue
-        cls = pad_registry.SF30_BT_PADS[mac]
-        if system_key in cls["fallback"]:
-            fallback.append((mac, "bt"))
+        slot = int(m.group(1))
+        ent = old.setdefault(slot, {"pad": None, "path": ""})
+        if m.group(2):
+            ent["path"] = m.group(3)
+        else:
+            ent["pad"] = m.group(3)
+    entries = []
+    for slot in sorted(old):
+        pad = old[slot]["pad"]
+        if pad and ":" in pad:
+            guid, name = pad.split(":", 1)
+            entries.append((guid, name, old[slot]["path"]))
+    return keep, entries
 
-    return native + fallback
+
+def _write_pad_slots(wanted):
+    """Found live 2026-11-09: EmulationStation does NOT assign players by
+    SDL device-index order -- its InputMapper (es-core/src/input/
+    InputMapper.cpp) persists a player-slot list in recalbox.conf
+    (emulationstation.padN=GUID:Name, plus padN.path on 10.x for
+    telling identical pads apart) and puts each connected pad into the
+    slot it remembers. A stale "pad0=...M30..." made the Mega Drive pad
+    player 1 in Mario Kart 64 although we had bound the N64 pads first.
+    So: while ES is stopped (caller guarantees it), rewrite exactly
+    these keys -- the wanted pads in slots 0.., then every previously
+    remembered entry not claimed by them, in their old order, so ES's
+    memory of currently-disconnected pads survives. Nothing else in the
+    file is touched; timestamped backup first (project safety rule)."""
+    try:
+        keep, old_entries = _read_pad_slots()
+    except OSError as e:
+        print(f"[AssignControllers] cannot read recalbox.conf: {e}")
+        return False
+
+    remaining = list(old_entries)
+    for ent in wanted:
+        if ent in remaining:
+            remaining.remove(ent)
+        else:  # same pad, path not remembered yet (e.g. BT, or new port)
+            for o in remaining:
+                if o[:2] == ent[:2] and (not o[2] or not ent[2]):
+                    remaining.remove(o)
+                    break
+    slots = (list(wanted) + remaining)[:MAX_PAD_SLOTS]
+    if slots == old_entries[:MAX_PAD_SLOTS] and len(old_entries) <= MAX_PAD_SLOTS:
+        return True  # already in the wanted order
+
+    os.makedirs(CONF_BACKUP_DIR, exist_ok=True)
+    backup = os.path.join(CONF_BACKUP_DIR, "recalbox.conf.bak-" + time.strftime("%Y%m%d-%H%M%S") + "-padslots")
+    shutil.copy2(RECALBOX_CONF, backup)
+    olds = sorted(f for f in os.listdir(CONF_BACKUP_DIR) if f.endswith("-padslots"))
+    for f in olds[:-CONF_BACKUPS_KEEP]:
+        try:
+            os.remove(os.path.join(CONF_BACKUP_DIR, f))
+        except OSError:
+            pass
+
+    while keep and keep[-1] == "":
+        keep.pop()
+    out = keep[:]
+    for i, (guid, name, path) in enumerate(slots):
+        out.append(f"emulationstation.pad{i}={guid}:{name}")
+        out.append(f"emulationstation.pad{i}.path={path}")
+    tmp = RECALBOX_CONF + ".tmp-padslots"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, RECALBOX_CONF)
+    print(f"[AssignControllers] pad slots written: {[s[1] + (' @' + s[2] if s[2] else '') for s in slots[:len(wanted)]]} (backup {backup})")
+    return True
 
 
 EMULATOR_PATTERNS = ["emulatorlauncher.pyc", "retroarch", "mupen64plus"]
@@ -150,29 +225,57 @@ def _real_es_pid():
     return r.stdout.split()[0]
 
 
+def _starter_pid():
+    r = subprocess.run(["pgrep", "-f", r"^/bin/bash /usr/bin/emulationstation-starter"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return r.stdout.split()[0]
+
+
+def _fix_pidfile():
+    """The pidfile must name the emulationstation-STARTER (that's what
+    start-stop-daemon -m writes and what `S31emulationstation stop`
+    signals: the starter traps SIGTERM, forwards it to ES, waits, and
+    does NOT respawn). v3.9/v3.10 wrongly wrote the ES binary's pid
+    here; on 2026-11-09 that let a stop signal ES directly while it was
+    still initialising after a boot-on-game session -- it took 30s to
+    quit, and a second ES was started beside it."""
+    pid = _starter_pid()
+    if pid:
+        try:
+            with open(ES_PIDFILE, "w") as f:
+                f.write(pid + "\n")
+        except OSError:
+            pass
+
+
+ES_STOP_TIMEOUT_S = 60
+
+
 def _es_stop():
-    # No need to call _stop_running_game_if_any() here -- apply_for_launch()
-    # already guarantees that unconditionally before it ever reaches this
-    # point (see its docstring for why that has to be unconditional, not
-    # just part of the pad-reconfiguration path).
-    #
-    # Found live 2026-10-19: `S31emulationstation stop` silently no-ops
-    # ("The frontend is not started") whenever /var/run/emulationstation.pid
-    # is stale -- already a known project gotcha (see ACTION_CARDS.md), but
-    # repeated stop/start cycling from THIS feature triggers it far more
-    # often than normal use ever did (confirmed: a stale pidfile from one
-    # cycle made the next cycle's stop a no-op, so the poll below just
-    # waited out its full 10s timeout watching an ES that was never
-    # actually signaled). Don't trust the init script alone -- fall back
-    # to signaling the real PID (found via pgrep, independent of the
-    # pidfile) directly if ES is still alive partway through the wait.
-    subprocess.run([ES_INIT_SCRIPT, "stop"], check=False)
-    for i in range(20):
-        pid = _real_es_pid()
-        if pid is None:
+    """Stop ES and wait until BOTH the starter and the ES binary are
+    gone. Never returns True while either is alive -- the caller only
+    writes recalbox.conf/es_input.cfg and starts a new ES on True.
+
+    Found live 2026-11-09: right after a boot-on-game session ends, ES
+    builds its whole UI (~12s) and only acts on SIGTERM afterwards; one
+    stop took 30s. Normal stops at the menu take 7-10s. So: generous
+    timeout, signal the starter (pidfile, then pgrep fallback for a
+    stale pidfile), ES itself only as the last resort."""
+    _fix_pidfile()
+    subprocess.run([ES_INIT_SCRIPT, "stop"], check=False, env=_es_env())
+    deadline = time.time() + ES_STOP_TIMEOUT_S
+    nudged = False
+    while time.time() < deadline:
+        starter, es = _starter_pid(), _real_es_pid()
+        if starter is None and es is None:
             return True
-        if i == 5:  # ~2.5s in -- give the init script a fair chance first
-            subprocess.run(["kill", "-TERM", pid], check=False)
+        if not nudged and time.time() > deadline - ES_STOP_TIMEOUT_S + 3:
+            # init script found no/stale pidfile -> signal what's alive
+            target = starter or es
+            subprocess.run(["kill", "-TERM", target], check=False)
+            nudged = True
         time.sleep(0.5)
     return False
 
@@ -180,30 +283,37 @@ def _es_stop():
 ES_PIDFILE = "/var/run/emulationstation.pid"
 
 
+def _es_env():
+    """Found live 2026-11-09: ES (and every emulator it launches) inherits
+    THIS process's environment. PulseAudio listens on
+    $XDG_RUNTIME_DIR/pulse/native = /run/user/0/... -- the boot-time rc
+    environment sets XDG_RUNTIME_DIR, an SSH shell does not. After the
+    daemon had been restarted by hand over SSH, every ES restart from
+    here came up without it and games had no sound at all. Always pass
+    the boot value explicitly, independent of how the daemon started."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/0")
+    return env
+
+
 def _es_start_and_wait_ready():
-    subprocess.run([ES_INIT_SCRIPT, "start"], check=False)
+    subprocess.run([ES_INIT_SCRIPT, "start"], check=False, env=_es_env())
     deadline = time.time() + ES_READY_TIMEOUT_S
     while time.time() < deadline:
+        # v3.10: with the new uid written before the start (BootOnGame)
+        # ES goes straight into the emulator and its API never answers
+        # until the game ends -- that cost the full 15s timeout and a
+        # late "done" beep. A running emulator means ES is up.
+        if _game_running():
+            _fix_pidfile()
+            return True
         try:
             r = subprocess.run(
                 ["curl", "-s", "--max-time", "1", "http://localhost:81/api/status"],
                 capture_output=True, text=True, timeout=2,
             )
             if r.stdout.strip():
-                # Keep the pidfile pointed at the real binary, not
-                # whichever wrapper PID the init script last wrote --
-                # the launching wrapper process normally exits once ES
-                # is up, leaving a stale pidfile for the *next* stop to
-                # trip over (see _es_stop()'s comment). Harmless if some
-                # other tool expects the wrapper's PID instead; this
-                # only has to be good enough for our own next _es_stop().
-                pid = _real_es_pid()
-                if pid:
-                    try:
-                        with open(ES_PIDFILE, "w") as f:
-                            f.write(pid + "\n")
-                    except OSError:
-                        pass
+                _fix_pidfile()
                 return True
         except Exception:
             pass
@@ -211,35 +321,187 @@ def _es_start_and_wait_ready():
     return False
 
 
-def _pad_key(item, kind):
-    """Stable, JSON-able identity for one chosen pad -- (vid_pid,
-    physical_path) for USB, the MAC string itself for BT. Used only to
-    compare "is this the same config as last time", not for the actual
-    bind/unbind calls (those need the full usb_connected() tuple)."""
-    if kind == "bt":
-        return item
-    vid_pid, _devpath, phys = item
-    return [vid_pid, phys]
+ES_INPUT_CFG = "/recalbox/share/system/.emulationstation/es_input.cfg"
 
 
-def apply_for_launch(uid_int):
+def _apply_n64_pad_profile(system_key):
+    """Write the per-console N64-pad block (pad_registry.N64_PAD_PROFILES)
+    for every connected N64 pad, keyed by its real devicePhysicalPath.
+    Caller guarantees ES is stopped (it rewrites es_input.cfg on exit).
+    Backup first, only if something actually changes."""
+    from configure_pads import DEVICE_TEMPLATES, build_block, replace_block
+    profile = pad_registry.n64_profile_for(system_key)
+    paths = [phys for vid_pid, _d, phys in pad_registry.usb_connected()
+             if vid_pid == pad_registry.N64_PAD_VIDPID]
+    if not paths:
+        return
+    with open(ES_INPUT_CFG, encoding="utf-8") as f:
+        old = f.read()
+    template = dict(DEVICE_TEMPLATES[pad_registry.N64_PAD_VIDPID])
+    template["inputs"] = pad_registry.N64_PAD_PROFILES[profile]
+    new = old
+    for phys in paths:
+        new = replace_block(new, phys, build_block(template, phys))
+    if new == old:
+        return
+    os.makedirs(CONF_BACKUP_DIR, exist_ok=True)
+    backup = os.path.join(CONF_BACKUP_DIR, "es_input.cfg.bak-" + time.strftime("%Y%m%d-%H%M%S") + "-n64profile")
+    shutil.copy2(ES_INPUT_CFG, backup)
+    olds = sorted(f for f in os.listdir(CONF_BACKUP_DIR) if f.endswith("-n64profile"))
+    for f in olds[:-CONF_BACKUPS_KEEP]:
+        try:
+            os.remove(os.path.join(CONF_BACKUP_DIR, f))
+        except OSError:
+            pass
+    tmp = ES_INPUT_CFG + ".tmp-n64profile"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(new)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, ES_INPUT_CFG)
+    print(f"[AssignControllers] N64 pad profile '{profile}' written for {paths} (backup {backup})")
+
+
+def _base_cls(cls):
+    """'sf30_usb'/'sf30_bt' -> 'sf30' etc. Wired or Bluetooth doesn't
+    matter for "is the right KIND of pad on this player"."""
+    return cls.rsplit("_", 1)[0]
+
+
+def _connected_entries():
+    """[(slot_entry, base_cls), ...] for every known pad connected right
+    now (USB in sysfs order, then BT)."""
+    out = []
+    for vid_pid, devpath, phys in pad_registry.usb_connected():
+        item = (vid_pid, devpath, phys)
+        out.append((_slot_entry(item, "usb"), _base_cls(pad_registry.USB_PADS[vid_pid]["cls"])))
+    for mac in pad_registry.bt_connected():
+        out.append((_slot_entry(mac, "bt"), _base_cls(pad_registry.BT_PADS[mac]["cls"])))
+    return out
+
+
+def _current_player_classes():
+    """Best model of who is player 1, 2, ... in the RUNNING ES: its
+    remembered slot list (recalbox.conf) reduced to the pads connected
+    right now. Slot entries match a connected pad on GUID+name and path
+    (an empty remembered path -- BT, or an old entry -- matches any).
+    Connected pads ES has no slot for go last, like ES does with new
+    pads. Returns [base_cls, ...] in player order."""
+    try:
+        _keep, slots = _read_pad_slots()
+    except OSError:
+        slots = []
+    remaining = _connected_entries()
+    order = []
+    for guid, name, path in slots:
+        for k, (ent, cls) in enumerate(remaining):
+            if ent[0] == guid and ent[1] == name and (not path or not ent[2] or ent[2] == path):
+                order.append(cls)
+                del remaining[k]
+                break
+    order.extend(cls for _ent, cls in remaining)
+    return order
+
+
+_INPUTCONFIG_RE = r'\t<inputConfig[^>]*devicePhysicalPath="{}"[^>]*>.*?</inputConfig>'
+
+
+def _n64_profile_matches(profile):
+    """True if every connected N64 pad's es_input.cfg block already IS
+    this profile (read-only, safe while ES runs). No N64 pad -> True."""
+    from configure_pads import DEVICE_TEMPLATES, build_block
+    paths = [phys for vid_pid, _d, phys in pad_registry.usb_connected()
+             if vid_pid == pad_registry.N64_PAD_VIDPID]
+    if not paths:
+        return True
+    try:
+        with open(ES_INPUT_CFG, encoding="utf-8") as f:
+            cfg = f.read()
+    except OSError:
+        return False
+    template = dict(DEVICE_TEMPLATES[pad_registry.N64_PAD_VIDPID])
+    template["inputs"] = pad_registry.N64_PAD_PROFILES[profile]
+    for phys in paths:
+        m = re.search(_INPUTCONFIG_RE.format(re.escape(phys)), cfg, re.DOTALL)
+        if not m or m.group(0) != build_block(template, phys):
+            return False
+    return True
+
+
+def _restart_reason(system_key, chosen):
+    """None if the running ES already has the right pads in front (no
+    restart), else a short reason string. The user's rule (2026-11-09):
+    USB pads are always on; restart ES ONLY when a wanted pad is really
+    there but on the wrong player --
+      * N64 <-> SNES: the N64 pads resp. SNES pads must be players 1..n
+        (n = players needed, as far as such pads are connected; for N64
+        3-4 players that includes the SF30s, but only if connected) and
+        the N64 pad's button profile must match the console.
+      * Mega Drive: only if an M30 (USB or BT) is connected and is not
+        player 1. Without an M30: play with whatever order is active.
+      * Every other system: never."""
+    if system_key in ("n64", "snes"):
+        want = [_chosen_cls(c) for c in chosen]
+        have = _current_player_classes()[:len(want)]
+        if have != want:
+            return f"players {have} != wanted {want}"
+        profile = pad_registry.n64_profile_for(system_key)
+        if not _n64_profile_matches(profile):
+            return f"N64 pad profile is not '{profile}'"
+        return None
+    if system_key == "megadrive":
+        if not chosen or _chosen_cls(chosen[0]) != "m30":
+            return None  # no M30 connected -> keep current order
+        have = _current_player_classes()[:1]
+        if have != ["m30"]:
+            return f"M30 connected but player 1 is {have}"
+        return None
+    return None
+
+
+def _chosen_cls(chosen_entry):
+    item, kind = chosen_entry
+    if kind == "usb":
+        return _base_cls(pad_registry.USB_PADS[item[0]]["cls"])
+    return _base_cls(pad_registry.BT_PADS[item]["cls"])
+
+
+def apply_for_launch(uid_int, before_es_start=None):
     """Called right before the daemon simulates a tap for uid_int.
-    Returns True if it changed the pad configuration (ES was restarted),
-    False if the existing configuration already matched (no-op, fast
-    path).
+    Returns True if it restarted ES with a new pad order, False if the
+    running ES was kept (fast path).
 
     Found live 2026-10-19: the project's pre-existing "direct API-to-API
     switch is unreliable" bug (documented in ACTION_CARDS.md) is caused
     by the old emulator simply never being told to exit -- the daemon's
     own "force removed edge" (association cleared, 0.3s sleep) is not
-    enough on its own. Confirmed by reproducing it: switching between
-    two games needing the SAME pad config (so this module's cache made
-    the rest of apply_for_launch() a no-op) silently kept the old game
-    running. Fix: always make sure no emulator is running before
-    returning, regardless of whether the pad configuration itself needs
-    to change -- this subsumes the documented "stop-then-launch"
-    workaround into every launch automatically."""
+    enough on its own. Fix: always make sure no emulator is running
+    before returning, regardless of whether the pad configuration
+    itself needs to change.
+
+    v3.10 (2026-11-09): USB pads are no longer unbound -- they stay on
+    all the time -- and ES is restarted only per _restart_reason()
+    (user's rule), checked against the real current state instead of a
+    cache of what we did last time."""
+    # Step timing (2026-11-09): each step logs its duration so the slow
+    # one can be identified from /tmp/nfc-acr.log.
+    t_start = time.time()
+    t_last = [t_start]
+
+    def _step(label):
+        now = time.time()
+        print(f"[AssignControllers] timing: {label} {now - t_last[0]:.2f}s "
+              f"(total {now - t_start:.2f}s)")
+        t_last[0] = now
+
     _stop_running_game_if_any()
+    _step("stop running game")
+
+    # USB pads always on: re-bind any pad an older version (or a
+    # pads_only_* action card) had switched off. No-op if bound; with
+    # ES running this is a normal hotplug.
+    for vid_pid, devpath, _phys in pad_registry.usb_connected():
+        pad_registry.usb_set_enabled(vid_pid, devpath, True)
 
     system_key, desired_count = _desired_player_count(uid_int)
     if system_key is None:
@@ -248,33 +510,62 @@ def apply_for_launch(uid_int):
 
     ordered = _priority_ordered_pads(system_key)
     chosen = ordered[:desired_count]
-
-    applied_key = {"system": system_key,
-                    "chosen": [_pad_key(item, kind) for item, kind in chosen]}
-    if _load_last_applied() == applied_key:
+    reason = _restart_reason(system_key, chosen)
+    if reason is None:
+        _step(f"pads already right for {system_key}, no ES restart")
         return False
 
     print(f"[AssignControllers] system={system_key} desired={desired_count} "
-          f"chosen={[(kind, item) for item, kind in chosen]}")
+          f"restart because {reason}; chosen={[(kind, item) for item, kind in chosen]}")
 
-    # Disable every known USB pad not in the chosen set, then (re-)bind
-    # the chosen ones in priority order -- a bind on an already-bound
-    # device is a harmless no-op, so this loop's real job is making
-    # sure freshly-(re)bound devices appear in OUR order, which is what
-    # establishes SDL's device-index order when ES starts below.
-    chosen_usb_physpaths = {item[2] for item, kind in chosen if kind == "usb"}
-    for vid_pid, devpath, phys in pad_registry.usb_connected():
-        if phys not in chosen_usb_physpaths:
-            pad_registry.usb_set_enabled(vid_pid, devpath, False)
-    for item, kind in chosen:
-        if kind == "usb":
-            vid_pid, devpath, phys = item
-            pad_registry.usb_set_enabled(vid_pid, devpath, True)
-
-    if not _es_stop():
-        print("[AssignControllers] WARNING: ES did not stop cleanly in time")
+    es_stopped = _es_stop()
+    _step("ES stop")
+    if es_stopped:
+        # Player order: chosen pads first, then EVERY known BT pad not
+        # chosen (connected or asleep -- they may wake up after ES
+        # started), in this system's priority order, pads not allowed
+        # for it last. Then the rest of the system's priority order for
+        # connected USB pads (always on now, so they need a defined
+        # place too), then whatever ES remembered before.
+        wanted = [_slot_entry(item, kind) for item, kind in chosen]
+        chosen_macs = {item for item, kind in chosen if kind == "bt"}
+        priority = pad_registry.SYSTEM_PRIORITY.get(system_key, pad_registry.DEFAULT_PRIORITY)
+        rest = [m for m in pad_registry.BT_PADS if m not in chosen_macs]
+        rank = lambda m: (priority.index(pad_registry.BT_PADS[m]["cls"])
+                          if pad_registry.BT_PADS[m]["cls"] in priority else len(priority))
+        for mac in sorted(rest, key=rank):
+            wanted.append(_slot_entry(mac, "bt"))
+        for item, kind in ordered[desired_count:]:
+            if kind == "usb":
+                wanted.append(_slot_entry(item, kind))
+        try:
+            _write_pad_slots(wanted)
+        except Exception as e:
+            print(f"[AssignControllers] WARNING: could not write pad slots: {e}")
+        try:
+            _apply_n64_pad_profile(system_key)
+        except Exception as e:
+            print(f"[AssignControllers] WARNING: could not write N64 pad profile: {e}")
+        _step("write pad slots + N64 profile")
+    else:
+        # Never edit recalbox.conf while ES might still be alive (it
+        # rewrites the file on exit), and never start a SECOND ES next
+        # to it (2026-11-09: that happened once). Leave the running ES
+        # alone; the daemon writes the card state after we return and
+        # ES picks the game up through its normal card-reader poll.
+        print("[AssignControllers] WARNING: ES did not stop within "
+              f"{ES_STOP_TIMEOUT_S}s -- pad slots NOT written, no ES start")
+        return False
+    # Hook (v3.9): the daemon writes the NEW card state here, while ES
+    # is still stopped, so ES boots straight into the game. Must never
+    # break the launch -- on failure the daemon writes the state after
+    # we return anyway (old path).
+    if before_es_start is not None:
+        try:
+            before_es_start()
+        except Exception as e:
+            print(f"[AssignControllers] before_es_start hook failed (non-fatal): {e}")
     if not _es_start_and_wait_ready():
         print("[AssignControllers] WARNING: ES did not report ready in time")
-
-    _save_last_applied(applied_key)
+    _step("ES start until API ready")
     return True

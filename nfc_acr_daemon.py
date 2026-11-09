@@ -53,8 +53,42 @@ import usb1
 # file ourselves and rebind sys.stdout/stderr to it (line-buffered) so
 # logging works regardless of how/whether the launcher redirects fds.
 LOG_FILE = "/tmp/nfc-acr.log"
+
+
+class _TimestampWriter:
+    """Prefix every log line with wall-clock time (HH:MM:SS.mmm), added
+    2026-11-09 to find where launch latency goes -- the log previously
+    had no times at all, so it couldn't be correlated with ES's own
+    frontend.log. Wraps the line-buffered file; write() may get partial
+    lines, so only prefix at the start of a line."""
+
+    def __init__(self, fh):
+        self._fh = fh
+        self._at_line_start = True
+
+    def write(self, s):
+        if not s:
+            return 0
+        out = []
+        for part in s.splitlines(keepends=True):
+            if self._at_line_start:
+                t = time.time()
+                out.append(time.strftime("%H:%M:%S", time.localtime(t))
+                           + f".{int(t * 1000) % 1000:03d} ")
+            out.append(part)
+            self._at_line_start = part.endswith("\n")
+        self._fh.write("".join(out))
+        return len(s)
+
+    def flush(self):
+        self._fh.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+
 try:
-    _log_fh = open(LOG_FILE, "a", buffering=1)
+    _log_fh = _TimestampWriter(open(LOG_FILE, "a", buffering=1))
     sys.stdout = _log_fh
     sys.stderr = _log_fh
 except Exception:
@@ -100,6 +134,12 @@ class ACRDaemon:
         # whitelisted-script launch -- the hardware poll loop and the
         # optional HTTP API thread can both call into these now.
         self._lock = threading.Lock()
+        # Serialises reader I/O: send_apdu() is a bulkWrite + bulkRead
+        # pair, and since v3.9 the tap ack blinks from its own thread
+        # while the launch proceeds -- a poll or LED command from another
+        # thread must never land between another command's write and read.
+        self._usb_lock = threading.Lock()
+        self._ack_thread = None
 
         # True when the current "card plugged" state was set by the API,
         # not by a real tap. Lets an API-launched game survive the poll
@@ -368,8 +408,9 @@ class ACRDaemon:
     def send_apdu(self, apdu):
         ccid = bytes([0x6F, len(apdu) & 0xFF, (len(apdu) >> 8) & 0xFF,
                       0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]) + bytes(apdu)
-        self.handle.bulkWrite(0x02, ccid, timeout=2000)
-        return list(self.handle.bulkRead(0x82, 256, timeout=2000))
+        with self._usb_lock:
+            self.handle.bulkWrite(0x02, ccid, timeout=2000)
+            return list(self.handle.bulkRead(0x82, 256, timeout=2000))
 
     def poll_card(self):
         """Poll for NFC card. Returns (uid_int, uid_bytes) with uid_int the
@@ -457,6 +498,41 @@ class ACRDaemon:
             self.led_command('red')
             time.sleep(0.15)
 
+    def ack_tap(self):
+        """Immediate 'card recognised, working on it' feedback for a new
+        game card (user request 2026-11-09): the pad reassignment / ES
+        restart below can take ~10s, and before this the only feedback
+        was the green+beep at its very end. One beep + two short green
+        flashes, ending green (card present). Distinct from
+        confirm_blink() (3 beeps, admin actions). Uses only the two
+        proven led_command() states -- no new APDU bytes.
+
+        v3.9: runs in its own thread. Measured live, the pattern took
+        ~2.4s inline (the reader only answers a blink command once the
+        blink is done), delaying every launch by that much. The final
+        led_command('green', buzz) of _set_game_state() joins it first
+        so the two never interleave."""
+        t = threading.Thread(target=self._ack_pattern, daemon=True)
+        self._ack_thread = t
+        t.start()
+
+    def _wait_ack(self):
+        t = self._ack_thread
+        if t is not None:
+            t.join(timeout=5)
+            self._ack_thread = None
+
+    def _ack_pattern(self):
+        self.led_command('green', buzz=self.buzzer)
+        time.sleep(0.15)
+        self.led_command('red')
+        time.sleep(0.15)
+        self.led_command('green')
+        time.sleep(0.15)
+        self.led_command('red')
+        time.sleep(0.15)
+        self.led_command('green')
+
     def _session_open(self, uid_int, source):
         """Start tracking a play session for the play-log. Call only
         while holding self._lock, right after the new 'plugged' state
@@ -517,6 +593,11 @@ class ACRDaemon:
         with self._lock:
             if self.plugged and self.uuid == uid_int:
                 return
+            # Physical taps only: an API launch has nobody standing at
+            # the reader, and this keeps the API thread's reader traffic
+            # exactly as before.
+            if not virtual:
+                self.ack_tap()
             if self.plugged:
                 self._session_close()
                 self.plugged = False
@@ -545,9 +626,24 @@ class ACRDaemon:
             # and waiting for the new tap below (caught live 2026-10-19:
             # switching Mario Kart 64 -> Donkey Kong 64 relaunched Mario
             # Kart 64 instead).
+            #
+            # v3.9 (2026-11-09): the NEW uid is written while ES is
+            # stopped, right before it starts again (before_es_start
+            # hook), so ES boots straight into the game through its own
+            # BootOnGame path instead of starting to the menu and then
+            # noticing the card on its next card-reader poll (measured
+            # 0.6-2.4s extra). The October bug above was the OLD uid
+            # being present at ES start -- the new one is exactly what
+            # should launch.
+            def _plug_new():
+                self.plugged = True
+                self.uuid = uid_int
+                self.virtual_card = virtual
+                self.write_state()
+                print(f"[ACR] state written before ES start (boot on game): {uid_int}")
             try:
                 import assign_controllers
-                assign_controllers.apply_for_launch(uid_int)
+                assign_controllers.apply_for_launch(uid_int, before_es_start=_plug_new)
             except Exception as e:
                 print(f"[AssignControllers] skipped (non-fatal): {e}")
             self.plugged = True
@@ -555,7 +651,11 @@ class ACRDaemon:
             self.virtual_card = virtual
             self.write_state()
             self._session_open(uid_int, 'api' if virtual else 'physical')
-        self.led_command('green', buzz=self.buzzer)
+        self._wait_ack()
+        # v3.10: a physical tap already beeped in ack_tap(); a second
+        # beep here came seconds after the game was visibly running
+        # (user, 2026-11-09). Only API launches still beep at the end.
+        self.led_command('green', buzz=self.buzzer and virtual)
 
     def _clear_game_state(self):
         """Mark no card as plugged -- real removal or an explicit

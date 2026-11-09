@@ -1,5 +1,101 @@
 # Changelog
 
+## v3.10 — ES restart only when really needed (2026-11-09)
+
+### Changed
+- **USB pads stay on.** `assign_controllers` no longer unbinds pads a
+  game doesn't need; it re-binds every known USB pad on each launch.
+- **ES is restarted only by the user's rule** (`_restart_reason()`):
+  N64 ↔ SNES switch (N64 or SNES pads must be in front, N64 pad
+  profile must match), SF30s for N64 3–4 players if connected, M30 as
+  Mega Drive player 1 if connected. Otherwise, e.g. Mega Drive without
+  M30 or Vectrex, the running ES is kept.
+- The decision uses the real state (remembered slots in
+  `recalbox.conf` reduced to connected pads, plus the N64 pad's
+  `es_input.cfg` block) instead of the last-launch cache
+  `/tmp/assign_controllers_last.json` (removed).
+
+### Fixed
+- **Late second beep** long after the game was already running: with
+  BootOnGame, ES's API doesn't answer while the emulator runs, so the
+  ready-wait ran into its 15 s timeout. It now also ends as soon as an
+  emulator is running, and a physical tap gets no second beep at the
+  end (the tap ack already beeped); API launches still do.
+- **ES stop could take 30 s and a second ES was started beside it.**
+  Right after a boot-on-game session ends, ES builds its UI (~12 s)
+  and only reacts to SIGTERM afterwards. On top of that, v3.9 had
+  rewritten the pidfile to the ES binary instead of the
+  `emulationstation-starter` wrapper that `S31emulationstation stop`
+  is meant to signal. Now: the pidfile always names the starter,
+  `_es_stop()` waits up to 60 s for starter AND ES to be gone, and if
+  that fails no second ES is started (the running one picks the card
+  up through its normal poll).
+
+### Device config (not in this repo)
+- ES background music off: `audio.bgmusic=0`, `audio.music.volume=0`
+  in `recalbox.conf` (was audible in console mode, where the menu
+  option isn't reachable). Backup `config-backups/*-bgmusic`.
+- Console-mode sound: `cardreader.consolemodesound=bios` → `recalbox`
+  (the "bios" setting plays `/recalbox/system/resources/cardreader/
+  Bios2.wav` regardless of `audio.bgmusic`; "recalbox" uses ES music,
+  which is off). Backup `config-backups/*-consolesound`.
+
+## v3.9 — Faster launches (2026-11-09)
+
+### Changed
+- `ack_tap()` runs in a background thread; `send_apdu()` is serialised
+  with a lock. The launch no longer waits 2.4 s for the blink pattern.
+- The new card state is written while ES is stopped
+  (`apply_for_launch(..., before_es_start=...)`), so ES boots straight
+  into the game.
+
+### Added
+- Step timing in `assign_controllers` (`timing: <step>` log lines) and
+  an `HH:MM:SS.mmm` prefix on every daemon log line.
+
+## v3.8 — Immediate tap feedback (2026-11-09)
+
+### Added
+- **`ack_tap()`**: a physical tap of a new game card now gets feedback
+  right away. That's 1 beep + 2 quick green flashes, before the pad
+  reassignment / ES restart, which can take ~10 s. Before this, the
+  only feedback was the green+beep at the very end. Uses only the two
+  proven `led_command()` states, no new APDU bytes. API launches and
+  repeat taps of the already-running game are unchanged. A restricted
+  game inside the admin window gets the 3-beep confirm burst followed
+  by this ack.
+
+## v3.7 — Correct player order, per-console N64 pad profile, sound fix (2026-11-09)
+
+Details: `ACTION_CARDS.md`, sections "Player order: ES's remembered pad
+slots" and "N64 pad: per-console button profile".
+
+### Fixed
+- **Wrong player 1 in Mario Kart 64** (M30 instead of an N64 pad). ES
+  does not assign players by SDL device order, as previously assumed.
+  It keeps a remembered slot list (`emulationstation.padN` /
+  `padN.path`) in `recalbox.conf`. `assign_controllers` now rewrites
+  exactly those keys while ES is stopped, with a timestamped backup
+  (`config-backups/*-padslots`).
+- **No sound in any game** after the daemon had been restarted over
+  SSH. ES restarts now always get `XDG_RUNTIME_DIR=/run/user/0`
+  (`_es_env()`).
+
+### Changed
+- `pad_registry.py`: `PAD_CLASS`/`SF30_BT_PADS` replaced by
+  `USB_PADS`/`BT_PADS`, which include the M30 (USB `2dc8:5006` + BT)
+  and the wired SF30 (`2dc8:6001`). Each entry carries the exact ES
+  name and GUID. New `SYSTEM_PRIORITY` per system; N64 only allows N64
+  pads + SF30s. USB pads are scanned directly via sysfs, so the 8BitDo
+  pads no longer need a `configure_pads.py` template.
+
+### Added
+- **Per-console N64 pad profile**: N64 games keep the existing mapping
+  (byte-identical; Hotkey/Select on L). SNES/Mega Drive/others get a
+  RetroArch-style mapping: real L/R shoulders, Hotkey/Select on Z,
+  C-buttons as the missing SNES A/X. Swapped in `es_input.cfg` while
+  ES is stopped, with backup (`config-backups/*-n64profile`).
+
 ## v3.6 — Secure remote-control API + play-session log
 
 ### Added

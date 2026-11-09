@@ -107,7 +107,8 @@ Then restart: `/etc/init.d/S32nfc-acr restart`
 | State | LED | Buzzer |
 |-------|-----|--------|
 | Waiting | Red | - |
-| Card detected | Green | Beep (if enabled) |
+| Card recognised (immediately) | 2× green flash, then green | 1 beep (if enabled) |
+| Game handed to ES (after pad setup, up to ~10 s) | Green | Beep (if enabled) |
 | Card removed | Red | - |
 
 ## After a Recalbox Update

@@ -88,7 +88,8 @@ LED/buzzer feedback:
 | Action/restricted card recognized inside window | fast red/green burst (3×, ~0.15s) | beep ×3 if enabled |
 | Window closed (timeout) | solid red | — |
 | Action/restricted card tapped **outside** a window | single red | — |
-| Normal game card | green | beep if enabled (unchanged, upstream) |
+| Normal game card, tap recognised (physical only, since v3.8) | 2× quick green flash (~0.15s), ends green | 1 beep if enabled |
+| Normal game card, launch handed to ES (after pad reassignment / ES restart, up to ~10s later) | green | beep if enabled (upstream) |
 
 Only the two ACR122U LED/buzzer APDU calls already proven to work by the
 original daemon (`green`, `red`) are ever used, including for all
@@ -353,13 +354,14 @@ stray SNES pad registered as an extra, unused controller.
   verified by hand, not guessed — see the Dev-machine `game_steckbriefe`
   project's `RetroKnowledge/overview.json` for the source of truth if
   this ever needs regenerating).
-- `assign_controllers.py` — `apply_for_launch(uid_int)`: looks up the
-  desired player count, builds the priority-ordered pad list, truncates
-  to that count, disables every other known pad, (re-)binds the chosen
-  ones in priority order, and — only if that configuration actually
-  differs from the last-applied one (cached, so repeat launches with an
-  unchanged configuration skip all of this) — stops EmulationStation,
-  lets the new binding take effect, and restarts it.
+- `assign_controllers.py` — `apply_for_launch(uid_int, before_es_start)`:
+  looks up the system and player count, builds the priority-ordered
+  pad list and decides from the **real current state** whether ES must
+  be restarted at all (`_restart_reason()`, see "When ES is restarted"
+  below). Only then: stop ES, write the player slots + N64 pad profile,
+  call the daemon's `before_es_start` hook, start ES. Before v3.10 it
+  also unbound every pad not needed and cached the last configuration;
+  both are gone.
 
 ### Integration point: the NFC daemon itself, not a Recalbox hook
 
@@ -384,20 +386,92 @@ still written there made the freshly-started ES immediately re-launch
 the game being switched *away from* — caught live, see the comment at
 the call site.
 
-### Why no `es_settings.cfg` player pinning
+### Player order: ES's remembered pad slots in `recalbox.conf` (2026-11-09)
 
-Confirmed by reading `recalbox/recalbox-emulationstation`'s
-`InputManager.cpp` (`configureEmulators()`): `es_settings.cfg`'s `INPUT
-P{n}NAME`/`INPUT P{n}GUID` fields can pin a specific pad *model* to a
-player slot, but there is no per-port/physical-path field at all — they
-cannot distinguish our 2 identical N64 pads (or 2 identical SNES pads)
-from each other. The actual lever for *those* is simpler: when no pin
-matches, ES assigns players by SDL device-index order, fixed once at
-its own startup. Since this feature always controls exactly which pads
-are bound, in exactly what order, right before restarting ES, no
-explicit `es_settings.cfg` writing is needed at all — confirmed against
-real `frontend.log` entries matching bind order to the resulting
-`-p1physicalpath`/`-p2physicalpath` in actual launch commands.
+`es_settings.cfg`'s `INPUT P{n}NAME`/`INPUT P{n}GUID` pins can only pin
+a pad *model*, not a port, so they can't tell 2 identical N64 pads
+apart. They're not used on this device.
+
+**Superseded assumption:** this section used to say ES assigns players
+by SDL device-index order, so binding pads in priority order before the
+ES restart was enough. That was **wrong**. It was found live when the
+M30 (Mega Drive pad) became P1 in Mario Kart 64 although the N64 pads
+had been bound first. ES 10.x's `InputMapper` (es-core/src/input/
+InputMapper.cpp) stores a player-slot list in `recalbox.conf`:
+
+```
+emulationstation.pad0=<GUID>:<Name>
+emulationstation.pad0.path=<devicePhysicalPath>   (empty for BT)
+...
+emulationstation.pad9=...
+```
+
+and puts every connected pad back into the slot it remembers.
+
+Current mechanism (`assign_controllers._write_pad_slots()`), run only
+while ES is stopped:
+1. Chosen pads in priority order go into slots 0…
+2. Then every known BT pad that wasn't chosen, in this system's priority
+   order. BT pads can't be unbound like USB ones and may wake up after
+   ES has started, so they have to sit *behind* the chosen ones. For
+   example, the M30 ends up behind both SF30s in a 4-player N64 game.
+3. Then all other previously remembered entries in their old order, so
+   ES's memory of currently unplugged pads survives.
+
+Only the `emulationstation.padN*` lines are rewritten. Everything else
+in `recalbox.conf` stays byte-identical, and a timestamped backup goes
+to `nfc-daemon/config-backups/recalbox.conf.bak-*-padslots` (last 20
+kept). If ES didn't stop cleanly in time, the slot write is skipped for
+that launch (never edit `recalbox.conf` under a live ES).
+
+Per-system priority now lives in `pad_registry.SYSTEM_PRIORITY`, as
+pad *classes* in order. A class missing from a system's list is never
+used for it:
+
+| System | Priority (classes) |
+|---|---|
+| `n64` | N64 USB → SF30 USB → SF30 BT (never M30/SNES pads) |
+| `megadrive` | M30 USB → M30 BT → SNES USB → N64 USB → SF30 USB → SF30 BT |
+| `snes` | SNES USB → SF30 USB → SF30 BT → N64 USB → M30 USB → M30 BT |
+| anything else | `DEFAULT_PRIORITY`: all pads, USB first |
+
+`pad_registry.USB_PADS` / `BT_PADS` replace the old `PAD_CLASS` /
+`SF30_BT_PADS`. Each entry carries the exact `es_name`/`es_guid` ES
+reports for that pad, copied from this device's `frontend.log`
+"Added joystick" lines and existing `padN` entries, never computed.
+Note that the wired SF30 is `2dc8:6001`; the `2dc8:6101` used earlier
+was its BT modalias.
+
+### N64 pad: per-console button profile (2026-11-09)
+
+`es_input.cfg` holds one block per pad, not per console, but the N64 pad
+needs different button names on N64 than elsewhere:
+- N64 games go through Recalbox's mupen64 `input.xml` translation table.
+- Every other system goes straight through RetroArch.
+
+Since `assign_controllers` restarts ES on every console change anyway,
+`_apply_n64_pad_profile()` swaps the N64 pads' `<inputConfig>` block in
+that window. It is written for each connected N64 pad by its real
+`devicePhysicalPath`, only if something actually changes, and backed up
+to `config-backups/es_input.cfg.bak-*-n64profile`.
+
+Profiles (`pad_registry.N64_PAD_PROFILES`, chosen by `n64_profile_for()`):
+- **`n64`**: byte-for-byte the block that was live on the device on
+  2026-11-09, verified with a diff before deploying. It's the v3.4
+  mapping, matching the stock mupen64 `input.xml`. Hotkey + Select sit
+  on **L** because the pad has no Select button, and Z+Start / L-combos
+  exit the game. Note that the repo's v3.5 template and `input.xml`
+  override (see "N64 pad" section above) were **never deployed**; the
+  device runs the stock `input.xml`.
+- **`retro`** (SNES, Mega Drive, everything else):
+  - L/R are real shoulders, which F-Zero needs.
+  - Hotkey + Select move to **Z**.
+  - N64 A/B = SNES B/Y.
+  - C-down / C-left = SNES A / X.
+  - On Mega Drive: A = N64 B, B = N64 A, C = C-down.
+
+Not yet tested live: N64 pad in an actual SNES game (it only gets picked
+when no SNES pad/SF30 is available).
 
 ### Two real bugs found live, fixed (not just theorized)
 
@@ -432,22 +506,61 @@ real `frontend.log` entries matching bind order to the resulting
    `pgrep`); a successful start now also rewrites the pidfile to the
    real PID, keeping the *next* cycle sane.
 
-### Known open gap: latency on configuration-change launches
+### When ES is restarted (v3.10, 2026-11-09)
 
-Cache-hit launches (pad configuration unchanged from the last one) are
-solidly fast, ~1s. A launch that genuinely needs to change which pads
-are bound — including from a completely idle starting state, not just
-switching away from an active game — is currently taking **~10s**, not
-the ~2s this same device measured in an isolated test earlier the same
-session, before any of this code existed. Not explained by the two bugs
-above (confirmed fixed; this happens even in clean runs with no
-warnings logged). Root cause not fully pinned down — `S31emulationstation
-stop` itself appears to take longer once this feature's cycling is
-layered on top than the earlier isolated measurement suggested. Good
-next step: instrument `_es_stop()`/`_es_start_and_wait_ready()` with
-finer-grained internal timestamps on a freshly-booted device, or
-consider managing ES's process directly instead of going through the
-`S31emulationstation` init-script wrapper at all.
+User's rule: USB pads are always on. Restarting ES (~10–15 s) is only
+worth it when a wanted pad is **really connected** but sits on the
+wrong player. `_restart_reason()` implements exactly that:
+
+| Game system | ES restart only if … |
+|---|---|
+| N64 | players 1..n are not the N64 pads (then the SF30s, if connected — that's the 3/4-player case), or the N64 pad's `es_input.cfg` block isn't the `n64` profile |
+| SNES | players 1..n are not the SNES pads (then SF30s, …), or the N64 pad block isn't the `retro` profile |
+| Mega Drive | an M30 (USB or BT) is connected and is not player 1. No M30 → play with the current order |
+| anything else | never |
+
+n = the game's `players_max`. Only connected pads count: an N64
+4-player game with the SF30s switched off compares only 2 players.
+"Same kind" is compared, not the exact pad (`sf30_usb` = `sf30_bt`,
+either SNES pad model), so the two identical N64 pads swapping places
+never causes a restart.
+
+**"Who is player n right now"** is modelled as ES's remembered slot
+list (`emulationstation.padN` in `recalbox.conf`) reduced to the pads
+connected right now (`_current_player_classes()`), plus connected pads
+without a slot at the end. This replaced the old last-launch cache
+(`/tmp/assign_controllers_last.json`), which didn't notice pads being
+switched on/off between games. Effect: switching N64 → Mega Drive (no
+M30) → N64 now never restarts ES; N64 ↔ SNES does.
+
+`apply_for_launch()` re-binds every known USB pad on every launch, so a
+pad switched off by an older version or a `pads_only_*` action card
+comes back by itself.
+
+### Launch latency (measured 2026-11-09, v3.9)
+
+Every step is logged as `[AssignControllers] timing: <step> Xs (total
+Ys)`, and every daemon log line has an `HH:MM:SS.mmm` prefix
+(`_TimestampWriter`). On a launch with an ES restart, total 12–15 s:
+
+- stopping the running game: 0–3 s
+- **ES stop: 7–10 s**. ES's own shutdown: webserver, an unexplained
+  ~4 s gap, then saving gamelists + `recalbox.conf`. Not shortened on
+  purpose: killing ES hard risks losing those writes.
+- writing slots/profile: < 0.1 s
+- ES start until `:81/api/status` answers: ~3 s
+
+v3.9 removed what could be removed without touching ES itself:
+1. The tap ack (green blink + beep, `ack_tap()`) runs in its own thread
+   instead of blocking the launch for 2.4 s. `send_apdu()` is
+   serialised with a lock, because the ACR122U only answers the next
+   APDU after a blink finished.
+2. The daemon writes the new card state **before** ES starts
+   (`before_es_start` hook), so ES boots directly into the game
+   (BootOnGame) instead of starting to the menu and then getting a
+   simulated tap.
+
+v3.10 then removes most restarts entirely (above).
 
 ### Not yet built
 
@@ -607,6 +720,26 @@ already-running path is in question.
 
 ## Known hardware/platform gotchas (don't re-introduce these)
 
+- **No sound after restarting things over SSH (found live 2026-11-09)**:
+  ES and every emulator inherit the environment of whoever (re)starts
+  ES. PulseAudio listens on `$XDG_RUNTIME_DIR/pulse/native` =
+  `/run/user/0/pulse/native`. The boot rc environment sets
+  `XDG_RUNTIME_DIR`, a plain SSH shell does not. After the daemon had
+  been restarted by hand over SSH, every ES restart it did came up
+  without sound. Fixed in code with `assign_controllers._es_env()`,
+  which always passes `XDG_RUNTIME_DIR=/run/user/0` to
+  `S31emulationstation stop/start`. By hand, always use
+  `export XDG_RUNTIME_DIR=/run/user/0; /etc/init.d/S32nfc-acr restart`
+  (same for `pactl` over SSH). Also note: restarting the daemon while a
+  card lies on the reader re-launches that game.
+- **Stale RetroArch auto-savestates crash cores**: RetroArch here runs
+  with `savestate_auto_load = true`. A leftover `<rom>.state.auto` in
+  `/recalbox/share/saves/<system>/` is loaded silently on every start of
+  any libretro core for that ROM. If it doesn't fit the core, the result
+  is an immediate segfault (exit -11 / ES "exit code 245") or a broken
+  game. First suspect when a libretro core "doesn't start" for one
+  game only. See `../system-tools/EMULATOR_TWEAKS.md` (Vigilante 8).
+
 - **BusyBox `start-stop-daemon --background`** redirects the forked
   child's fd 0/1/2 to `/dev/null` itself, *after* the init script's own
   `>> LOGFILE` redirect — silently winning over it. The daemon therefore
@@ -666,6 +799,12 @@ already-running path is in question.
   layer added — it runs as a thread inside the same daemon process
   rather than a second service, specifically so a Recalbox update only
   ever needs this one `--update` call, never a second one for the API.
+- `recalbox.conf` / `es_input.cfg` changes made at launch time (pad
+  slots, N64 profile) live on the share partition, so they **survive**
+  updates. They are rewritten on the next launch anyway.
+- Per-game emulator overrides (`/recalbox/share/roms/<sys>/<rom>.core.cfg`
+  / `.recalbox.conf`) **survive** updates. They aren't part of this
+  repo; see `../system-tools/EMULATOR_TWEAKS.md`.
 - Anything touched directly on `/recalbox/system/...` (e.g. a custom
   console-mode video under `/recalbox/system/resources/cardreader/`) is
   **not** update-persistent and isn't covered by this installer at all.
