@@ -562,6 +562,17 @@ v3.9 removed what could be removed without touching ES itself:
 
 v3.10 then removes most restarts entirely (above).
 
+**Slow stop right after a game (accepted, 2026-11-09):** when a card is
+removed, ES in console mode plays the intro video
+`cardreader.consolemodevideo` (`Bios2.mp4`, exactly 24 s; `Bios1.mp4`
+is 20 s) and only acts on SIGTERM once it has finished. A restart
+within ~25 s of a game ending therefore takes ~30 s instead of 7–10 s
+(measured twice: SIGTERM → "Quit requested" 26 s). ES has no "no
+video" option, a shorter own video would have to live in the system
+partition that updates wipe, and SIGKILL risks the gamelist/config
+writes. User decided to leave it. Switches without a restart are not
+affected.
+
 ### Not yet built
 
 - Stage 2: when a game wants more players than are currently available
